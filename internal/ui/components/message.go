@@ -49,6 +49,10 @@ var (
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(lipgloss.Color("62")).
 			Padding(0, 1)
+
+	streamCursorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("86")).
+				Blink(true)
 )
 
 // ContentBlock represents a block of content in a message.
@@ -100,9 +104,15 @@ func RenderMessage(msg MessageModel, width int) string {
 	b.WriteString(prefix + "\n")
 
 	// Render content blocks
-	for _, block := range msg.Content {
+	for i, block := range msg.Content {
 		renderedBlock := renderContentBlock(block, width-4)
+		if msg.IsStreaming && i == len(msg.Content)-1 && block.Type == "text" {
+			renderedBlock += streamCursorStyle.Render("▌")
+		}
 		b.WriteString(messageBoxStyle.Render(renderedBlock) + "\n")
+	}
+	if msg.IsStreaming && len(msg.Content) == 0 {
+		b.WriteString(messageBoxStyle.Render(streamCursorStyle.Render("▌")) + "\n")
 	}
 
 	// Add timestamp if present
@@ -254,6 +264,72 @@ func (m *MessageListModel) AddMessage(msg MessageModel) {
 	m.Messages = append(m.Messages, msg)
 	// Auto-scroll to bottom
 	m.ScrollOffset = 0
+}
+
+// AppendAssistantDelta appends text to the active assistant message, creating
+// that message when the first streamed chunk arrives.
+func (m *MessageListModel) AppendAssistantDelta(text string) {
+	if text == "" {
+		return
+	}
+	if len(m.Messages) == 0 || m.Messages[len(m.Messages)-1].Role != "assistant" ||
+		!m.Messages[len(m.Messages)-1].IsStreaming {
+		m.Messages = append(m.Messages, MessageModel{
+			Role:        "assistant",
+			Content:     []ContentBlock{{Type: "text"}},
+			IsStreaming: true,
+		})
+	}
+	message := &m.Messages[len(m.Messages)-1]
+	if len(message.Content) == 0 || message.Content[len(message.Content)-1].Type != "text" {
+		message.Content = append(message.Content, ContentBlock{Type: "text"})
+	}
+	message.Content[len(message.Content)-1].Text += text
+	m.ScrollOffset = 0
+}
+
+// FinalizeAssistantStream marks the active response complete. The complete
+// response text is authoritative and also supports providers that emitted no
+// text deltas.
+func (m *MessageListModel) FinalizeAssistantStream(content string) {
+	if len(m.Messages) > 0 {
+		message := &m.Messages[len(m.Messages)-1]
+		if message.Role == "assistant" && message.IsStreaming {
+			if content != "" {
+				message.Content = []ContentBlock{{Type: "text", Text: content}}
+			}
+			message.IsStreaming = false
+			m.ScrollOffset = 0
+			return
+		}
+	}
+	if content != "" {
+		m.AddMessage(MessageModel{
+			Role:    "assistant",
+			Content: []ContentBlock{{Type: "text", Text: content}},
+		})
+	}
+}
+
+// AbortAssistantStream removes the streaming marker while retaining any text
+// that was received before an error or cancellation.
+func (m *MessageListModel) AbortAssistantStream() {
+	if len(m.Messages) == 0 {
+		return
+	}
+	message := &m.Messages[len(m.Messages)-1]
+	if message.Role == "assistant" {
+		message.IsStreaming = false
+	}
+}
+
+// HasStreamingAssistant reports whether the latest message is in progress.
+func (m *MessageListModel) HasStreamingAssistant() bool {
+	if len(m.Messages) == 0 {
+		return false
+	}
+	message := m.Messages[len(m.Messages)-1]
+	return message.Role == "assistant" && message.IsStreaming
 }
 
 // ScrollUp scrolls the rendered conversation up by one line.

@@ -190,6 +190,7 @@ func (c *OpenAIClient) StreamMessage(ctx context.Context, req MessageRequest, on
 	}
 
 	startedToolCalls := make(map[int]bool)
+	startedMessage := false
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -208,6 +209,18 @@ func (c *OpenAIClient) StreamMessage(ctx context.Context, req MessageRequest, on
 		var chunk openAIChatResponse
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			return fmt.Errorf("failed to decode OpenAI stream event: %w", err)
+		}
+		if !startedMessage {
+			startedMessage = true
+			message := MessageResponse{
+				ID:    chunk.ID,
+				Type:  "message",
+				Role:  "assistant",
+				Model: chunk.Model,
+			}
+			if err := onEvent(StreamEvent{Type: "message_start", Message: &message}); err != nil {
+				return err
+			}
 		}
 		if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
 			usage := convertOpenAIUsage(chunk.Usage)

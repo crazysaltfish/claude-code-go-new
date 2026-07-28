@@ -156,6 +156,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitForMessages())
 
 	case queryCompleteMsg:
+		m.chat.AbortAssistantMessage()
 		if m.chat.State == components.ChatStateProcessing {
 			m.chat.State = components.ChatStateIdle
 		}
@@ -250,6 +251,16 @@ func (m *AppModel) waitForMessages() tea.Cmd {
 
 func (m *AppModel) handleSDKMessage(msg query.SDKMessage) {
 	switch msg.Type {
+	case "assistant_delta":
+		switch delta := msg.Message.(type) {
+		case query.AssistantDelta:
+			m.chat.AppendAssistantDelta(delta.Text)
+		case *query.AssistantDelta:
+			if delta != nil {
+				m.chat.AppendAssistantDelta(delta.Text)
+			}
+		}
+
 	case "assistant":
 		if response, ok := msg.Message.(*api.MessageResponse); ok {
 			var textParts []string
@@ -258,9 +269,7 @@ func (m *AppModel) handleSDKMessage(msg query.SDKMessage) {
 					textParts = append(textParts, block.Text)
 				}
 			}
-			if len(textParts) > 0 {
-				m.chat.AddAssistantMessage(strings.Join(textParts, "\n"))
-			}
+			m.chat.FinalizeAssistantMessage(strings.Join(textParts, "\n"))
 		}
 
 	case "tool_result":

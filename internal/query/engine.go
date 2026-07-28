@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,6 +73,14 @@ type SDKMessage struct {
 	SessionID string      `json:"session_id"`
 	UUID      string      `json:"uuid"`
 	Timestamp int64       `json:"timestamp"`
+}
+
+// AssistantDelta is emitted while an assistant response is still streaming.
+// Text and thinking are separated so UI consumers can choose whether to
+// display model reasoning.
+type AssistantDelta struct {
+	Text     string `json:"text,omitempty"`
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // ResultMessage represents the final result of a query.
@@ -200,9 +210,24 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 			}
 		}
 
-		// Call the API
+		// Stream the API response. All deltas for this turn share a UUID so
+		// consumers can update one in-progress assistant message in place.
 		apiStarted := time.Now()
-		response, err := e.callAPI(ctx, req)
+		responseUUID := generateUUID()
+		response, err := e.callAPIStream(ctx, req, func(delta AssistantDelta) error {
+			select {
+			case output <- SDKMessage{
+				Type:      "assistant_delta",
+				Message:   delta,
+				SessionID: e.sessionID,
+				UUID:      responseUUID,
+				Timestamp: time.Now().UnixMilli(),
+			}:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
 		e.apiDuration += time.Since(apiStarted)
 		if err != nil {
 			output <- SDKMessage{
@@ -233,7 +258,7 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 			Type:      "assistant",
 			Message:   response,
 			SessionID: e.sessionID,
-			UUID:      generateUUID(),
+			UUID:      responseUUID,
 			Timestamp: time.Now().UnixMilli(),
 		}
 
@@ -451,12 +476,180 @@ func (e *QueryEngine) convertToolsForAPI() []api.ToolDefinition {
 	return tools
 }
 
-// callAPI calls the configured provider through the canonical message client.
-func (e *QueryEngine) callAPI(ctx context.Context, req api.MessageRequest) (*api.MessageResponse, error) {
+// callAPIStream streams the configured provider and assembles its canonical
+// events into the same complete response used by the tool execution loop.
+func (e *QueryEngine) callAPIStream(
+	ctx context.Context,
+	req api.MessageRequest,
+	onDelta func(AssistantDelta) error,
+) (*api.MessageResponse, error) {
 	if e.config.APIClient == nil {
 		return nil, fmt.Errorf("API client not configured")
 	}
-	return e.config.APIClient.CreateMessage(ctx, req)
+
+	builder := newStreamResponseBuilder(req.Model)
+	eventCount := 0
+	err := e.config.APIClient.StreamMessage(ctx, req, func(event api.StreamEvent) error {
+		eventCount++
+		return builder.apply(event, onDelta)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if eventCount == 0 {
+		return nil, fmt.Errorf("API stream ended without any events")
+	}
+	return builder.response(), nil
+}
+
+type streamBlockBuilder struct {
+	block        api.ContentBlock
+	partialInput strings.Builder
+}
+
+type streamResponseBuilder struct {
+	result api.MessageResponse
+	blocks map[int]*streamBlockBuilder
+}
+
+func newStreamResponseBuilder(model string) *streamResponseBuilder {
+	return &streamResponseBuilder{
+		result: api.MessageResponse{
+			Type:  "message",
+			Role:  "assistant",
+			Model: model,
+		},
+		blocks: make(map[int]*streamBlockBuilder),
+	}
+}
+
+func (b *streamResponseBuilder) apply(event api.StreamEvent, onDelta func(AssistantDelta) error) error {
+	if event.Message != nil {
+		b.mergeMessage(*event.Message)
+	}
+	if event.Usage != nil {
+		mergeStreamUsage(&b.result.Usage, *event.Usage)
+	}
+
+	switch event.Type {
+	case "content_block_start":
+		if event.ContentBlock == nil {
+			return nil
+		}
+		block := *event.ContentBlock
+		b.blocks[event.Index] = &streamBlockBuilder{block: block}
+		if block.Type == "text" && block.Text != "" && onDelta != nil {
+			return onDelta(AssistantDelta{Text: block.Text})
+		}
+		if block.Type == "thinking" && block.Thinking != "" && onDelta != nil {
+			return onDelta(AssistantDelta{Thinking: block.Thinking})
+		}
+
+	case "content_block_delta":
+		if event.Delta == nil {
+			return nil
+		}
+		block := b.ensureBlock(event.Index, event.Delta)
+		switch event.Delta.Type {
+		case "text_delta":
+			block.block.Text += event.Delta.Text
+			if event.Delta.Text != "" && onDelta != nil {
+				return onDelta(AssistantDelta{Text: event.Delta.Text})
+			}
+		case "thinking_delta":
+			block.block.Thinking += event.Delta.Thinking
+			if event.Delta.Thinking != "" && onDelta != nil {
+				return onDelta(AssistantDelta{Thinking: event.Delta.Thinking})
+			}
+		case "input_json_delta":
+			block.partialInput.WriteString(event.Delta.PartialJSON)
+		}
+
+	case "message_delta":
+		if event.Delta != nil && event.Delta.StopReason != "" {
+			b.result.StopReason = event.Delta.StopReason
+		}
+	}
+	return nil
+}
+
+func (b *streamResponseBuilder) ensureBlock(index int, delta *api.EventDelta) *streamBlockBuilder {
+	if block, ok := b.blocks[index]; ok {
+		return block
+	}
+	blockType := "text"
+	if delta != nil {
+		switch delta.Type {
+		case "thinking_delta":
+			blockType = "thinking"
+		case "input_json_delta":
+			blockType = "tool_use"
+		}
+	}
+	block := &streamBlockBuilder{block: api.ContentBlock{Type: blockType}}
+	b.blocks[index] = block
+	return block
+}
+
+func (b *streamResponseBuilder) mergeMessage(message api.MessageResponse) {
+	if message.ID != "" {
+		b.result.ID = message.ID
+	}
+	if message.Type != "" {
+		b.result.Type = message.Type
+	}
+	if message.Role != "" {
+		b.result.Role = message.Role
+	}
+	if message.Model != "" {
+		b.result.Model = message.Model
+	}
+	if message.StopReason != "" {
+		b.result.StopReason = message.StopReason
+	}
+	if message.StopSequence != "" {
+		b.result.StopSequence = message.StopSequence
+	}
+	mergeStreamUsage(&b.result.Usage, message.Usage)
+}
+
+func mergeStreamUsage(target *api.Usage, update api.Usage) {
+	// Streaming providers report cumulative counters at different points in
+	// the stream, so the latest non-zero value replaces rather than adds.
+	if update.InputTokens != 0 {
+		target.InputTokens = update.InputTokens
+	}
+	if update.OutputTokens != 0 {
+		target.OutputTokens = update.OutputTokens
+	}
+	if update.CacheCreationInputTokens != 0 {
+		target.CacheCreationInputTokens = update.CacheCreationInputTokens
+	}
+	if update.CacheReadInputTokens != 0 {
+		target.CacheReadInputTokens = update.CacheReadInputTokens
+	}
+}
+
+func (b *streamResponseBuilder) response() *api.MessageResponse {
+	indexes := make([]int, 0, len(b.blocks))
+	for index := range b.blocks {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+
+	b.result.Content = make([]api.ContentBlock, 0, len(indexes))
+	for _, index := range indexes {
+		part := b.blocks[index]
+		if part.block.Type == "tool_use" {
+			if input := part.partialInput.String(); input != "" {
+				part.block.Input = json.RawMessage(input)
+			} else if len(part.block.Input) == 0 {
+				part.block.Input = json.RawMessage(`{}`)
+			}
+		}
+		b.result.Content = append(b.result.Content, part.block)
+	}
+	return &b.result
 }
 
 // extractToolUseBlocks extracts tool use blocks from a response.

@@ -31,9 +31,21 @@ func TestQueryEngineToolRoundTrip(t *testing.T) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		if !request.Stream {
+			t.Error("query engine did not request an Anthropic stream")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
 		if calls.Add(1) == 1 {
-			fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"Read","input":{"target_file":%q}}],"model":"test","stop_reason":"tool_use","usage":{"input_tokens":2,"output_tokens":3}}`, target)
+			arguments, err := json.Marshal(map[string]string{"target_file": target})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			fmt.Fprintln(w, `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"test","usage":{"input_tokens":2,"output_tokens":0}}}`)
+			fmt.Fprintln(w, `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"Read","input":{}}}`)
+			fmt.Fprintf(w, "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":%q}}\n\n", string(arguments))
+			fmt.Fprintln(w, `data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}}`)
+			fmt.Fprintln(w, `data: {"type":"message_stop"}`)
 			return
 		}
 		if len(request.Messages) < 3 {
@@ -44,7 +56,12 @@ func TestQueryEngineToolRoundTrip(t *testing.T) {
 				t.Errorf("unexpected tool result message: %#v", last)
 			}
 		}
-		fmt.Fprint(w, `{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"text","text":"final answer"}],"model":"test","stop_reason":"end_turn","usage":{"input_tokens":4,"output_tokens":5}}`)
+		fmt.Fprintln(w, `data: {"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","content":[],"model":"test","usage":{"input_tokens":4,"output_tokens":0}}}`)
+		fmt.Fprintln(w, `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+		fmt.Fprintln(w, `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"final "}}`)
+		fmt.Fprintln(w, `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}`)
+		fmt.Fprintln(w, `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`)
+		fmt.Fprintln(w, `data: {"type":"message_stop"}`)
 	}))
 	defer server.Close()
 
@@ -99,6 +116,7 @@ func TestQueryEngineOpenAIToolRoundTrip(t *testing.T) {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		var request struct {
+			Stream   bool `json:"stream"`
 			Messages []struct {
 				Role       string      `json:"role"`
 				Content    interface{} `json:"content"`
@@ -110,7 +128,10 @@ func TestQueryEngineOpenAIToolRoundTrip(t *testing.T) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		if !request.Stream {
+			t.Error("query engine did not request an OpenAI stream")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
 		if calls.Add(1) == 1 {
 			arguments, err := json.Marshal(map[string]string{"target_file": target})
 			if err != nil {
@@ -118,25 +139,12 @@ func TestQueryEngineOpenAIToolRoundTrip(t *testing.T) {
 				http.Error(w, "failed to encode arguments", http.StatusInternalServerError)
 				return
 			}
-			fmt.Fprintf(w, `{
-				"id":"chatcmpl_1",
-				"object":"chat.completion",
-				"model":"test",
-				"choices":[{
-					"index":0,
-					"message":{
-						"role":"assistant",
-						"content":null,
-						"tool_calls":[{
-							"id":"call_1",
-							"type":"function",
-							"function":{"name":"Read","arguments":%q}
-						}]
-					},
-					"finish_reason":"tool_calls"
-				}],
-				"usage":{"prompt_tokens":2,"completion_tokens":3}
-			}`, string(arguments))
+			fmt.Fprintln(w, `data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"test","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":""}]}`)
+			fmt.Fprintf(w, "data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":%q}}]},\"finish_reason\":\"\"}]}\n\n", string(arguments[:len(arguments)/2]))
+			fmt.Fprintf(w, "data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":%q}}]},\"finish_reason\":\"\"}]}\n\n", string(arguments[len(arguments)/2:]))
+			fmt.Fprintln(w, `data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"test","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`)
+			fmt.Fprintln(w, `data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"test","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3}}`)
+			fmt.Fprintln(w, `data: [DONE]`)
 			return
 		}
 
@@ -150,17 +158,10 @@ func TestQueryEngineOpenAIToolRoundTrip(t *testing.T) {
 				t.Errorf("unexpected OpenAI tool result message: %#v", last)
 			}
 		}
-		fmt.Fprint(w, `{
-			"id":"chatcmpl_2",
-			"object":"chat.completion",
-			"model":"test",
-			"choices":[{
-				"index":0,
-				"message":{"role":"assistant","content":"OpenAI final answer"},
-				"finish_reason":"stop"
-			}],
-			"usage":{"prompt_tokens":4,"completion_tokens":5}
-		}`)
+		fmt.Fprintln(w, `data: {"id":"chatcmpl_2","object":"chat.completion.chunk","model":"test","choices":[{"index":0,"delta":{"content":"OpenAI "},"finish_reason":""}]}`)
+		fmt.Fprintln(w, `data: {"id":"chatcmpl_2","object":"chat.completion.chunk","model":"test","choices":[{"index":0,"delta":{"content":"final answer"},"finish_reason":"stop"}]}`)
+		fmt.Fprintln(w, `data: {"id":"chatcmpl_2","object":"chat.completion.chunk","model":"test","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":5}}`)
+		fmt.Fprintln(w, `data: [DONE]`)
 	}))
 	defer server.Close()
 
@@ -183,10 +184,14 @@ func TestQueryEngineOpenAIToolRoundTrip(t *testing.T) {
 	}
 	var result ResultMessage
 	var sawToolResult bool
+	var streamedText strings.Builder
 	for event := range output {
 		switch event := event.(type) {
 		case SDKMessage:
 			sawToolResult = sawToolResult || event.Type == "tool_result"
+			if event.Type == "assistant_delta" {
+				streamedText.WriteString(event.Message.(AssistantDelta).Text)
+			}
 		case ResultMessage:
 			result = event
 		}
@@ -200,5 +205,8 @@ func TestQueryEngineOpenAIToolRoundTrip(t *testing.T) {
 	}
 	if result.Usage.InputTokens != 6 || result.Usage.OutputTokens != 8 {
 		t.Fatalf("unexpected OpenAI usage: %#v", result.Usage)
+	}
+	if streamedText.String() != "OpenAI final answer" {
+		t.Fatalf("unexpected streamed text: %q", streamedText.String())
 	}
 }

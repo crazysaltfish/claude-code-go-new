@@ -155,7 +155,11 @@ func (m *ChatModel) View() string {
 
 	// Status bar or processing indicator
 	if m.State == ChatStateProcessing {
-		b.WriteString(m.Spinner.ViewWithText("Thinking...") + "\n")
+		status := "Thinking..."
+		if m.Messages.HasStreamingAssistant() {
+			status = "Responding..."
+		}
+		b.WriteString(m.Spinner.ViewWithText(status) + "\n")
 	} else if m.State == ChatStateError {
 		b.WriteString(errorStyle.Render(m.Error.Error()) + "\n")
 	}
@@ -194,6 +198,21 @@ func (m *ChatModel) AddAssistantMessage(content string) {
 		Role:    "assistant",
 		Content: []ContentBlock{{Type: "text", Text: content}},
 	})
+}
+
+// AppendAssistantDelta updates the current assistant response in place.
+func (m *ChatModel) AppendAssistantDelta(content string) {
+	m.Messages.AppendAssistantDelta(content)
+}
+
+// FinalizeAssistantMessage completes the current streamed response.
+func (m *ChatModel) FinalizeAssistantMessage(content string) {
+	m.Messages.FinalizeAssistantStream(content)
+}
+
+// AbortAssistantMessage retains partial output but removes its stream cursor.
+func (m *ChatModel) AbortAssistantMessage() {
+	m.Messages.AbortAssistantStream()
 }
 
 // AddUserMessage adds a user message.
@@ -316,6 +335,7 @@ func (m *ChatModel) updateMessageViewport() {
 
 // SetError sets an error state.
 func (m *ChatModel) SetError(err error) {
+	m.AbortAssistantMessage()
 	m.Error = err
 	m.State = ChatStateError
 }

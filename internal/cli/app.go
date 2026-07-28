@@ -34,6 +34,7 @@ type App struct {
 	version            string
 	permissionRequests chan ui.PermissionRequest
 	permissionUI       bool
+	printStreamActive  bool
 }
 
 // Config holds CLI configuration.
@@ -388,6 +389,20 @@ func isExternalPermissionMode(mode types.PermissionMode) bool {
 
 // printSDKMessage prints an SDK message in print mode.
 func (a *App) printSDKMessage(msg query.SDKMessage) {
+	if msg.Type == "assistant_delta" {
+		if delta, ok := msg.Message.(query.AssistantDelta); ok {
+			if delta.Text != "" {
+				fmt.Print(delta.Text)
+				a.printStreamActive = true
+			}
+		}
+		return
+	}
+	if msg.Type == "assistant" && a.printStreamActive {
+		fmt.Println()
+		a.printStreamActive = false
+		return
+	}
 	data, _ := json.MarshalIndent(msg, "", "  ")
 	fmt.Println(string(data))
 }

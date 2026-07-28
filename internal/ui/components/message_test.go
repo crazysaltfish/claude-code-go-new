@@ -75,3 +75,35 @@ func TestChatHistoryKeyboardAndMouseScrolling(t *testing.T) {
 		t.Fatalf("mouse wheel did not return to latest messages: offset=%d", model.Messages.ScrollOffset)
 	}
 }
+
+func TestAssistantStreamUpdatesSingleMessage(t *testing.T) {
+	model := NewChatModel(60, 20)
+
+	model.AppendAssistantDelta("hello")
+	model.AppendAssistantDelta(" world")
+
+	if len(model.Messages.Messages) != 1 {
+		t.Fatalf("stream created %d messages, want 1", len(model.Messages.Messages))
+	}
+	message := model.Messages.Messages[0]
+	if !message.IsStreaming {
+		t.Fatal("assistant message should be marked as streaming")
+	}
+	if got := message.Content[0].Text; got != "hello world" {
+		t.Fatalf("unexpected streamed content: %q", got)
+	}
+	if got := model.Messages.View(); !strings.Contains(got, "▌") {
+		t.Fatalf("stream cursor is not rendered:\n%s", got)
+	}
+
+	model.FinalizeAssistantMessage("hello world")
+	if len(model.Messages.Messages) != 1 {
+		t.Fatalf("finalization duplicated the assistant message: %d", len(model.Messages.Messages))
+	}
+	if model.Messages.Messages[0].IsStreaming {
+		t.Fatal("assistant message remained in streaming state")
+	}
+	if got := model.Messages.View(); strings.Contains(got, "▌") {
+		t.Fatalf("stream cursor remained after finalization:\n%s", got)
+	}
+}

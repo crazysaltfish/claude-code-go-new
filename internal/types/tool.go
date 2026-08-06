@@ -80,6 +80,12 @@ type Tool interface {
 	MaxResultSizeChars() int
 }
 
+// ToolInputValidator is an optional validation stage for semantic constraints
+// that do not fit the compact JSON Schema representation.
+type ToolInputValidator interface {
+	ValidateInput(input json.RawMessage) error
+}
+
 // CanUseToolFunc is a function type for checking tool permissions.
 type CanUseToolFunc func(ctx context.Context, toolName string, input json.RawMessage) (*PermissionDecision, error)
 

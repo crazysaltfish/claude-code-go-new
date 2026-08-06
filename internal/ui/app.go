@@ -275,8 +275,17 @@ func (m *AppModel) handleSDKMessage(msg query.SDKMessage) {
 	case "tool_result":
 		if data, ok := msg.Message.(map[string]interface{}); ok {
 			toolName, _ := data["tool_name"].(string)
+			toolUseID, _ := data["tool_use_id"].(string)
 			content, _ := data["content"].(string)
-			m.chat.AddToolResult(toolName, content)
+			isError, _ := data["is_error"].(bool)
+			m.chat.AddToolResult(toolName, toolUseID, content, isError)
+		}
+
+	case "tool_progress":
+		if data, ok := msg.Message.(map[string]interface{}); ok {
+			toolName, _ := data["tool_name"].(string)
+			toolUseID, _ := data["tool_use_id"].(string)
+			m.chat.UpdateToolProgress(toolName, toolUseID, formatToolProgress(data["data"]))
 		}
 
 	case "system":
@@ -293,9 +302,23 @@ func (m *AppModel) handleSDKMessage(msg query.SDKMessage) {
 				if content, ok := data["content"].(string); ok {
 					m.chat.AddSystemMessage(content)
 				}
+			case "recovery":
+				reason, _ := data["reason"].(string)
+				attempt, _ := data["attempt"].(int)
+				m.chat.AddSystemMessage(fmt.Sprintf("Recovering from %s (attempt %d)", reason, attempt))
 			}
 		}
 	}
+}
+
+func formatToolProgress(progress interface{}) string {
+	if text, ok := progress.(string); ok {
+		return text
+	}
+	if encoded, err := json.Marshal(progress); err == nil {
+		return string(encoded)
+	}
+	return fmt.Sprintf("%v", progress)
 }
 
 func (m *AppModel) handleResultMessage(msg query.ResultMessage) {

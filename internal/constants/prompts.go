@@ -259,7 +259,7 @@ func GetMarketingNameForModel(modelId string) string {
 	case containsString(modelId, "claude-opus-4"):
 		return "Claude Opus 4"
 	case containsString(modelId, "claude-sonnet-4"):
-		return "Claude Sonnet 4"
+		return "Claude Sonnet 4ni "
 	default:
 		return ""
 	}

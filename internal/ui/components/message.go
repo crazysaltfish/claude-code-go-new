@@ -97,6 +97,8 @@ func RenderMessage(msg MessageModel, width int) string {
 		prefix = assistantStyle.Render("Claude:")
 	case "system":
 		prefix = systemStyle.Render("System:")
+	case "tool_progress", "tool_result":
+		prefix = toolUseStyle.Render("Tool:")
 	default:
 		prefix = msg.Role + ":"
 	}
@@ -132,11 +134,21 @@ func renderContentBlock(block ContentBlock, width int) string {
 		return renderToolUse(block, width)
 	case "tool_result":
 		return renderToolResult(block, width)
+	case "tool_progress":
+		return renderToolProgress(block, width)
 	case "thinking":
 		return renderThinking(block, width)
 	default:
 		return fmt.Sprintf("[%s block]", block.Type)
 	}
+}
+
+func renderToolProgress(block ContentBlock, width int) string {
+	label := "Running"
+	if block.Name != "" {
+		label = "Running " + block.Name
+	}
+	return toolUseStyle.Render("↻ "+label) + "\n" + wrapText(fmt.Sprintf("%v", block.Content), width-2)
 }
 
 // renderToolUse renders a tool use block.
@@ -264,6 +276,44 @@ func (m *MessageListModel) AddMessage(msg MessageModel) {
 	m.Messages = append(m.Messages, msg)
 	// Auto-scroll to bottom
 	m.ScrollOffset = 0
+}
+
+// UpsertToolProgress keeps only the latest progress payload for each tool call.
+func (m *MessageListModel) UpsertToolProgress(toolName, toolUseID, content string) {
+	for i := len(m.Messages) - 1; i >= 0; i-- {
+		message := &m.Messages[i]
+		if message.Role != "tool_progress" || len(message.Content) == 0 ||
+			message.Content[0].ToolUseID != toolUseID {
+			continue
+		}
+		message.Content[0].Name = toolName
+		message.Content[0].Content = content
+		m.ScrollOffset = 0
+		return
+	}
+	m.AddMessage(MessageModel{
+		Role: "tool_progress",
+		Content: []ContentBlock{{
+			Type:      "tool_progress",
+			Name:      toolName,
+			ToolUseID: toolUseID,
+			Content:   content,
+		}},
+	})
+}
+
+// RemoveToolProgress removes the transient row once a final result arrives.
+func (m *MessageListModel) RemoveToolProgress(toolUseID string) {
+	for i := len(m.Messages) - 1; i >= 0; i-- {
+		message := m.Messages[i]
+		if message.Role != "tool_progress" || len(message.Content) == 0 ||
+			message.Content[0].ToolUseID != toolUseID {
+			continue
+		}
+		m.Messages = append(m.Messages[:i], m.Messages[i+1:]...)
+		m.ScrollOffset = 0
+		return
+	}
 }
 
 // AppendAssistantDelta appends text to the active assistant message, creating

@@ -93,6 +93,7 @@ func IsCommandEnabled(cmd *Command) bool {
 type Registry struct {
 	commands map[string]CommandHandler
 	aliases  map[string]string
+	order    []string
 }
 
 // NewRegistry creates a new command registry.
@@ -100,11 +101,15 @@ func NewRegistry() *Registry {
 	return &Registry{
 		commands: make(map[string]CommandHandler),
 		aliases:  make(map[string]string),
+		order:    make([]string, 0),
 	}
 }
 
 // Register adds a command to the registry.
 func (r *Registry) Register(handler CommandHandler) {
+	if _, exists := r.commands[handler.Name()]; !exists {
+		r.order = append(r.order, handler.Name())
+	}
 	r.commands[handler.Name()] = handler
 }
 
@@ -130,9 +135,11 @@ func (r *Registry) Get(name string) (CommandHandler, bool) {
 
 // List returns all registered commands.
 func (r *Registry) List() []CommandHandler {
-	result := make([]CommandHandler, 0, len(r.commands))
-	for _, cmd := range r.commands {
-		result = append(result, cmd)
+	result := make([]CommandHandler, 0, len(r.order))
+	for _, name := range r.order {
+		if cmd, ok := r.commands[name]; ok {
+			result = append(result, cmd)
+		}
 	}
 	return result
 }
@@ -140,7 +147,7 @@ func (r *Registry) List() []CommandHandler {
 // ListEnabled returns all enabled commands.
 func (r *Registry) ListEnabled() []CommandHandler {
 	result := make([]CommandHandler, 0)
-	for _, cmd := range r.commands {
+	for _, cmd := range r.List() {
 		if cmd.IsEnabled() {
 			result = append(result, cmd)
 		}

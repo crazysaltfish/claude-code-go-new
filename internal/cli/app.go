@@ -45,6 +45,7 @@ type Config struct {
 	Model          string
 	PermissionMode string
 	Cwd            string
+	MaxTokens      int
 	MaxTurns       int
 	Provider       string
 	APIKey         string
@@ -129,8 +130,7 @@ func (a *App) Initialize() error {
 	a.registerCommands()
 
 	// Initialize tool registry
-	a.toolRegistry = tools.NewToolRegistry()
-	a.registerTools()
+	a.toolRegistry = tools.NewToolRegistryWithOptions(tools.RegistryOptionsFromEnv())
 
 	// Initialize the selected provider client.
 	switch provider {
@@ -170,6 +170,7 @@ func (a *App) Initialize() error {
 		SessionID:  a.stateManager.GetSessionID(),
 		Cwd:        cwd,
 		Tools:      a.toolRegistry.ListEnabled(),
+		MaxTokens:  a.config.MaxTokens,
 		MaxTurns:   a.config.MaxTurns,
 		APIClient:  a.apiClient,
 		CanUseTool: a.canUseTool,
@@ -426,15 +427,6 @@ func (a *App) registerCommands() {
 	a.registry.Register(commands.NewConfigCommand())
 	a.registry.Register(commands.NewCostCommand())
 	a.registry.Register(commands.NewThemeCommand())
-}
-
-// registerTools registers all built-in tools.
-func (a *App) registerTools() {
-	a.toolRegistry.Register(tools.NewBashTool())
-	a.toolRegistry.Register(tools.NewFileReadTool())
-	a.toolRegistry.Register(tools.NewFileWriteTool())
-	a.toolRegistry.Register(tools.NewGlobTool())
-	a.toolRegistry.Register(tools.NewGrepTool())
 }
 
 // Shutdown cleans up resources.

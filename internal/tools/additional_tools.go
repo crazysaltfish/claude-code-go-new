@@ -36,8 +36,10 @@ func NewSleepTool() *SleepTool {
 				Type: "object",
 				Properties: map[string]map[string]interface{}{
 					"duration": {
-						"type":        "number",
-						"description": "Duration to sleep in seconds",
+						"type":             "number",
+						"exclusiveMinimum": 0,
+						"maximum":          3600,
+						"description":      "Duration to sleep in seconds",
 					},
 					"reason": {
 						"type":        "string",
@@ -93,6 +95,23 @@ func (t *SleepTool) Call(ctx context.Context, args json.RawMessage, toolCtx *typ
 			ToolUseID: toolCtx.ToolUseId,
 		}, nil
 	}
+}
+
+// ValidateInput enforces semantic duration limits before permission approval.
+func (t *SleepTool) ValidateInput(args json.RawMessage) error {
+	var input struct {
+		Duration float64 `json:"duration"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return err
+	}
+	if input.Duration <= 0 {
+		return fmt.Errorf("duration must be positive")
+	}
+	if input.Duration > 3600 {
+		return fmt.Errorf("duration cannot exceed 3600 seconds (1 hour)")
+	}
+	return nil
 }
 
 // IsConcurrencySafe returns true for sleep tool.

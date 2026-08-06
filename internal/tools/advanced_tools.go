@@ -35,6 +35,7 @@ func NewWebSearchTool() *WebSearchTool {
 				Properties: map[string]map[string]interface{}{
 					"query": {
 						"type":        "string",
+						"minLength":   2,
 						"description": "The search query to use (minimum 2 characters)",
 					},
 					"allowed_domains": {
@@ -100,6 +101,25 @@ func (t *WebSearchTool) Call(ctx context.Context, args json.RawMessage, toolCtx 
 		Output:    fmt.Sprintf("Web search for '%s' would be performed. (Requires API integration)", input.Query),
 		ToolUseID: toolCtx.ToolUseId,
 	}, nil
+}
+
+// ValidateInput rejects contradictory search scopes before permission approval.
+func (t *WebSearchTool) ValidateInput(args json.RawMessage) error {
+	var input struct {
+		Query          string   `json:"query"`
+		AllowedDomains []string `json:"allowed_domains,omitempty"`
+		BlockedDomains []string `json:"blocked_domains,omitempty"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return err
+	}
+	if len(input.Query) < 2 {
+		return fmt.Errorf("query must be at least 2 characters")
+	}
+	if len(input.AllowedDomains) > 0 && len(input.BlockedDomains) > 0 {
+		return fmt.Errorf("cannot specify both allowed_domains and blocked_domains")
+	}
+	return nil
 }
 
 // =============================================================================

@@ -107,3 +107,30 @@ func TestAssistantStreamUpdatesSingleMessage(t *testing.T) {
 		t.Fatalf("stream cursor remained after finalization:\n%s", got)
 	}
 }
+
+func TestToolProgressIsUpdatedInPlaceAndReplacedByResult(t *testing.T) {
+	model := NewChatModel(60, 20)
+	model.UpdateToolProgress("Synthetic", "tool_1", `{"percent":10}`)
+	model.UpdateToolProgress("Synthetic", "tool_1", `{"percent":50}`)
+
+	if len(model.Messages.Messages) != 1 {
+		t.Fatalf("progress created %d rows, want 1", len(model.Messages.Messages))
+	}
+	progress := model.Messages.Messages[0]
+	if progress.Role != "tool_progress" || progress.Content[0].Content != `{"percent":50}` {
+		t.Fatalf("unexpected progress row: %#v", progress)
+	}
+
+	model.AddToolResult("Synthetic", "tool_1", "done", false)
+	if len(model.Messages.Messages) != 1 {
+		t.Fatalf("final result left transient progress rows: %#v", model.Messages.Messages)
+	}
+	result := model.Messages.Messages[0]
+	if result.Role != "tool_result" || result.Content[0].Content != "done" {
+		t.Fatalf("unexpected final tool row: %#v", result)
+	}
+	view := model.Messages.View()
+	if !strings.Contains(view, "done") || strings.Contains(view, "<nil>") {
+		t.Fatalf("tool result rendered incorrectly:\n%s", view)
+	}
+}

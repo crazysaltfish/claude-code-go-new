@@ -231,11 +231,23 @@ func (m *ChatModel) AddSystemMessage(content string) {
 	})
 }
 
-// AddToolResult adds a tool result message.
-func (m *ChatModel) AddToolResult(toolName, content string) {
+// UpdateToolProgress creates or refreshes a transient tool progress row.
+func (m *ChatModel) UpdateToolProgress(toolName, toolUseID, content string) {
+	m.Messages.UpsertToolProgress(toolName, toolUseID, content)
+}
+
+// AddToolResult replaces transient progress with the final tool result.
+func (m *ChatModel) AddToolResult(toolName, toolUseID, content string, isError bool) {
+	m.Messages.RemoveToolProgress(toolUseID)
 	m.Messages.AddMessage(MessageModel{
-		Role:    "tool_result",
-		Content: []ContentBlock{{Type: "tool_result", Text: fmt.Sprintf("%s: %s", toolName, content)}},
+		Role: "tool_result",
+		Content: []ContentBlock{{
+			Type:      "tool_result",
+			Name:      toolName,
+			ToolUseID: toolUseID,
+			Content:   content,
+			IsError:   isError,
+		}},
 	})
 }
 

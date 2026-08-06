@@ -269,6 +269,7 @@ claude-code --debug "为什么这个测试失败了？"
 | `--model` | `-m` | 指定使用的模型（如 claude-sonnet-4-20250514） |
 | `--permission-mode` | | 权限模式：default, acceptEdits, bypassPermissions |
 | `--max-turns` | | 最大对话轮数（默认 100） |
+| `--max-tokens` | | 单次 API 响应的最大输出 token 数（默认 4096） |
 
 ### 子命令
 
@@ -789,6 +790,12 @@ pkg/
 |------|------|
 | `API_TIMEOUT_MS` | API 请求超时（毫秒） |
 | `CLAUDE_CODE_DISABLE_PERSISTENT_RETRY` | 禁用持久重试 |
+
+### 工具曝光策略
+| 变量 | 说明 |
+|------|------|
+| `CLAUDE_CODE_SIMPLE` | 设为 `1`/`true` 时仅向模型暴露 Bash、Read、Edit |
+| `CLAUDE_CODE_DISABLE_TOOLS` | 按规范名称禁用工具，多个名称使用逗号分隔，如 `Bash,Grep` |
 
 ---
 

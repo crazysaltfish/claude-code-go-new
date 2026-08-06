@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
+	"reflect"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -35,6 +38,7 @@ type QueryEngineConfig struct {
 	UserSpecifiedModel string
 	FallbackModel      string
 	ThinkingConfig     *types.ThinkingConfig
+	MaxTokens          int
 	MaxTurns           int
 	MaxBudgetUsd       float64
 	Verbose            bool
@@ -82,6 +86,11 @@ type AssistantDelta struct {
 	Text     string `json:"text,omitempty"`
 	Thinking string `json:"thinking,omitempty"`
 }
+
+const (
+	maxOutputTokensRecoveryLimit = 3
+	streamInterruptionRetryLimit = 1
+)
 
 // ResultMessage represents the final result of a query.
 type ResultMessage struct {
@@ -167,6 +176,8 @@ func (e *QueryEngine) SubmitMessage(ctx context.Context, prompt string) (<-chan 
 // executeQueryLoop runs the main query loop.
 func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interface{}) {
 	turnCount := 0
+	maxOutputTokensRecoveries := 0
+	streamInterruptionRecoveries := 0
 	maxTurns := e.config.MaxTurns
 	if maxTurns == 0 {
 		maxTurns = 100 // Default max turns
@@ -193,10 +204,15 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 		// Get the model to use
 		model := e.getModel()
 
+		maxTokens := e.config.MaxTokens
+		if maxTokens <= 0 {
+			maxTokens = constants.DefaultMaxTokens
+		}
+
 		// Create API request
 		req := api.MessageRequest{
 			Model:     model,
-			MaxTokens: 4096,
+			MaxTokens: maxTokens,
 			Messages:  e.convertMessagesForAPI(),
 			System:    systemPrompt,
 			Tools:     e.convertToolsForAPI(),
@@ -229,7 +245,18 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 			}
 		})
 		e.apiDuration += time.Since(apiStarted)
+		if response != nil {
+			e.addUsage(response.Usage)
+		}
 		if err != nil {
+			if ctx.Err() == nil && !e.abortController.IsAborted() &&
+				streamInterruptionRecoveries < streamInterruptionRetryLimit &&
+				e.appendRecoverablePartialResponse(response, responseUUID, "stream_interrupted", output) {
+				streamInterruptionRecoveries++
+				e.appendRecoveryPrompt("The previous response was interrupted while streaming. Resume directly from where it stopped. Do not repeat completed content; retry any incomplete tool call from scratch.")
+				e.emitRecoveryEvent(output, "stream_interrupted", streamInterruptionRecoveries)
+				continue
+			}
 			output <- SDKMessage{
 				Type:      "system",
 				Message:   map[string]string{"subtype": "error", "error": err.Error()},
@@ -240,11 +267,20 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 			return
 		}
 
-		// Update usage
-		e.totalUsage.InputTokens += response.Usage.InputTokens
-		e.totalUsage.OutputTokens += response.Usage.OutputTokens
-		e.totalUsage.CacheCreationInputTokens += response.Usage.CacheCreationInputTokens
-		e.totalUsage.CacheReadInputTokens += response.Usage.CacheReadInputTokens
+		streamInterruptionRecoveries = 0
+
+		if response.StopReason == "max_tokens" || response.StopReason == "model_context_window_exceeded" {
+			e.appendRecoverablePartialResponse(response, responseUUID, response.StopReason, output)
+			if maxOutputTokensRecoveries < maxOutputTokensRecoveryLimit {
+				maxOutputTokensRecoveries++
+				e.appendRecoveryPrompt("Output token limit hit. Resume directly — no apology or recap. Pick up mid-thought, and break remaining work into smaller pieces. Retry any incomplete tool call from scratch.")
+				e.emitRecoveryEvent(output, "max_output_tokens", maxOutputTokensRecoveries)
+				continue
+			}
+			output <- e.createErrorResultMessage("max_output_tokens", "output token recovery limit reached", turnCount)
+			return
+		}
+		maxOutputTokensRecoveries = 0
 
 		// Create assistant message
 		assistantMsg := types.Message{
@@ -261,11 +297,6 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 			UUID:      responseUUID,
 			Timestamp: time.Now().UnixMilli(),
 		}
-
-		// Check for max_output_tokens error
-		// Note: The full recovery logic for max_output_tokens is handled at a higher level
-		// (similar to TypeScript's query.ts recovery loop). Here we just detect and signal.
-		// TODO: Implement full recovery loop if needed for SDK consumers.
 
 		// Check for tool use
 		toolUseBlocks := e.extractToolUseBlocks(response)
@@ -494,12 +525,86 @@ func (e *QueryEngine) callAPIStream(
 		return builder.apply(event, onDelta)
 	})
 	if err != nil {
-		return nil, err
+		if eventCount == 0 {
+			return nil, err
+		}
+		return builder.response(), err
 	}
 	if eventCount == 0 {
 		return nil, fmt.Errorf("API stream ended without any events")
 	}
 	return builder.response(), nil
+}
+
+func (e *QueryEngine) addUsage(usage api.Usage) {
+	e.totalUsage.InputTokens += usage.InputTokens
+	e.totalUsage.OutputTokens += usage.OutputTokens
+	e.totalUsage.CacheCreationInputTokens += usage.CacheCreationInputTokens
+	e.totalUsage.CacheReadInputTokens += usage.CacheReadInputTokens
+}
+
+// appendRecoverablePartialResponse keeps only protocol-safe text from a cut-off
+// response. Incomplete tool_use JSON must never be replayed into the next API
+// request because it has no matching tool_result and may not be valid JSON.
+func (e *QueryEngine) appendRecoverablePartialResponse(
+	response *api.MessageResponse,
+	responseUUID, stopReason string,
+	output chan<- interface{},
+) bool {
+	if response == nil {
+		return false
+	}
+	content := make([]api.ContentBlock, 0, len(response.Content))
+	for _, block := range response.Content {
+		if block.Type == "text" && block.Text != "" {
+			content = append(content, block)
+		}
+	}
+	if len(content) == 0 {
+		if len(response.Content) == 0 && stopReason == "stream_interrupted" {
+			return false
+		}
+		content = append(content, api.ContentBlock{
+			Type: "text",
+			Text: "[The response was interrupted during an incomplete tool call.]",
+		})
+	}
+	safeResponse := *response
+	safeResponse.Content = content
+	safeResponse.StopReason = stopReason
+	e.mutableMessages = append(e.mutableMessages, types.Message{
+		Role:    "assistant",
+		Content: mustMarshalJSON(content),
+	})
+	output <- SDKMessage{
+		Type:      "assistant",
+		Message:   &safeResponse,
+		SessionID: e.sessionID,
+		UUID:      responseUUID,
+		Timestamp: time.Now().UnixMilli(),
+	}
+	return true
+}
+
+func (e *QueryEngine) appendRecoveryPrompt(prompt string) {
+	e.mutableMessages = append(e.mutableMessages, types.Message{
+		Role:    "user",
+		Content: mustMarshalJSON([]map[string]string{{"type": "text", "text": prompt}}),
+	})
+}
+
+func (e *QueryEngine) emitRecoveryEvent(output chan<- interface{}, reason string, attempt int) {
+	output <- SDKMessage{
+		Type: "system",
+		Message: map[string]interface{}{
+			"subtype": "recovery",
+			"reason":  reason,
+			"attempt": attempt,
+		},
+		SessionID: e.sessionID,
+		UUID:      generateUUID(),
+		Timestamp: time.Now().UnixMilli(),
+	}
 }
 
 type streamBlockBuilder struct {
@@ -665,96 +770,500 @@ func (e *QueryEngine) extractToolUseBlocks(response *api.MessageResponse) []api.
 
 // executeTools executes tool calls and yields progress.
 func (e *QueryEngine) executeTools(ctx context.Context, blocks []api.ContentBlock, output chan<- interface{}) []types.Message {
-	var results []types.Message
+	outcomesInModelOrder := make([]toolExecutionOutcome, 0, len(blocks))
+	completionOrder := make([]int, 0, len(blocks))
 
-	for _, block := range blocks {
-		// Find the tool
-		tool := e.findTool(block.Name)
-		if tool == nil {
-			results = append(results, types.Message{
-				Role: "user",
-				Content: mustMarshalJSON([]map[string]interface{}{
-					{
-						"type":        "tool_result",
-						"tool_use_id": block.ID,
-						"content":     fmt.Sprintf("Unknown tool: %s", block.Name),
-						"is_error":    true,
-					},
-				}),
-			})
-			output <- toolResultSDKMessage(e.sessionID, block.Name, block.ID, fmt.Sprintf("Unknown tool: %s", block.Name), true)
-			continue
-		}
-
-		if e.config.CanUseTool != nil {
-			decision, err := e.config.CanUseTool(ctx, block.Name, block.Input)
-			if err != nil {
-				results = append(results, toolErrorMessage(block.ID, err.Error()))
-				output <- toolResultSDKMessage(e.sessionID, block.Name, block.ID, err.Error(), true)
-				continue
+	for _, batch := range e.partitionToolCalls(blocks) {
+		baseIndex := len(outcomesInModelOrder)
+		outcomes := make([]toolExecutionOutcome, len(batch.blocks))
+		localCompletionOrder := make([]int, 0, len(batch.blocks))
+		if batch.concurrent {
+			var wg sync.WaitGroup
+			var completionMu sync.Mutex
+			wg.Add(len(batch.blocks))
+			for i, block := range batch.blocks {
+				go func(index int, toolUse api.ContentBlock) {
+					defer wg.Done()
+					outcomes[index] = e.executeTool(ctx, toolUse, func(progress interface{}) {
+						e.emitToolProgress(ctx, output, toolUse, progress)
+					})
+					completionMu.Lock()
+					localCompletionOrder = append(localCompletionOrder, index)
+					completionMu.Unlock()
+				}(i, block)
 			}
-			if decision != nil && decision.Behavior != types.PermissionBehaviorAllow {
-				message := decision.Message
-				if message == "" {
-					message = fmt.Sprintf("permission %s for tool %s", decision.Behavior, block.Name)
-				}
-				results = append(results, toolErrorMessage(block.ID, message))
-				output <- toolResultSDKMessage(e.sessionID, block.Name, block.ID, message, true)
-				continue
-			}
-		}
-
-		// Execute the tool
-		toolCtx := &types.ToolContext{
-			ToolUseId: block.ID,
-			Options:   types.ToolOptions{},
-			GetAppState: func() interface{} {
-				if e.config.GetAppState == nil {
-					return nil
-				}
-				return e.config.GetAppState()
-			},
-		}
-
-		result, err := tool.Call(ctx, block.Input, toolCtx, e.config.CanUseTool, nil, nil)
-		if err != nil {
-			results = append(results, toolErrorMessage(block.ID, err.Error()))
-			output <- toolResultSDKMessage(e.sessionID, block.Name, block.ID, err.Error(), true)
-			continue
-		}
-		if result == nil {
-			message := fmt.Sprintf("tool %s returned no result", block.Name)
-			results = append(results, toolErrorMessage(block.ID, message))
-			output <- toolResultSDKMessage(e.sessionID, block.Name, block.ID, message, true)
-			continue
-		}
-
-		// Create tool result message
-		var content string
-		if result.Error != nil {
-			content = result.Error.Error()
+			wg.Wait()
 		} else {
-			content = fmt.Sprintf("%v", result.Output)
+			for i, block := range batch.blocks {
+				outcomes[i] = e.executeTool(ctx, block, func(progress interface{}) {
+					e.emitToolProgress(ctx, output, block, progress)
+				})
+				localCompletionOrder = append(localCompletionOrder, i)
+			}
 		}
 
-		resultBlock := map[string]interface{}{
-			"type":        "tool_result",
-			"tool_use_id": block.ID,
-			"content":     content,
+		// Preserve the model's tool-call order in conversation history even when
+		// UI progress and final events arrived in completion order.
+		for _, outcome := range outcomes {
+			outcomesInModelOrder = append(outcomesInModelOrder, outcome)
 		}
-		if result.Error != nil {
-			resultBlock["is_error"] = true
+		for _, index := range localCompletionOrder {
+			completionOrder = append(completionOrder, baseIndex+index)
 		}
-		results = append(results, types.Message{
-			Role:    "user",
-			Content: mustMarshalJSON([]map[string]interface{}{resultBlock}),
-		})
-
-		// Yield progress
-		output <- toolResultSDKMessage(e.sessionID, block.Name, block.ID, content, result.Error != nil)
+	}
+	applyToolResultAggregateBudget(outcomesInModelOrder, constants.MaxToolResultsPerMessageChars)
+	results := make([]types.Message, 0, len(outcomesInModelOrder))
+	for _, index := range completionOrder {
+		e.emitSDKMessage(ctx, output, outcomesInModelOrder[index].sdkMessage)
+	}
+	for _, outcome := range outcomesInModelOrder {
+		results = append(results, outcome.message)
 	}
 
 	return mergeToolResultMessages(results)
+}
+
+type toolCallBatch struct {
+	concurrent bool
+	blocks     []api.ContentBlock
+}
+
+type toolExecutionOutcome struct {
+	message       types.Message
+	sdkMessage    SDKMessage
+	toolName      string
+	toolUseID     string
+	content       string
+	isError       bool
+	truncated     bool
+	originalChars int
+}
+
+// partitionToolCalls mirrors Claude Code's orchestration rule: adjacent calls
+// explicitly declared concurrency-safe share a parallel batch; all other calls
+// form single-item serial barriers.
+func (e *QueryEngine) partitionToolCalls(blocks []api.ContentBlock) []toolCallBatch {
+	batches := make([]toolCallBatch, 0, len(blocks))
+	for _, block := range blocks {
+		tool := e.findTool(block.Name)
+		concurrent := tool != nil && tool.IsConcurrencySafe(block.Input)
+		if concurrent && len(batches) > 0 && batches[len(batches)-1].concurrent {
+			last := &batches[len(batches)-1]
+			last.blocks = append(last.blocks, block)
+			continue
+		}
+		batches = append(batches, toolCallBatch{
+			concurrent: concurrent,
+			blocks:     []api.ContentBlock{block},
+		})
+	}
+	return batches
+}
+
+func (e *QueryEngine) executeTool(
+	ctx context.Context,
+	block api.ContentBlock,
+	onProgress func(progress interface{}),
+) toolExecutionOutcome {
+	tool := e.findTool(block.Name)
+	if tool == nil {
+		message := fmt.Sprintf("Unknown tool: %s", block.Name)
+		return e.toolErrorOutcome(block, message)
+	}
+	if err := validateToolInput(block.Input, tool.InputSchema()); err != nil {
+		return e.toolErrorOutcome(block, fmt.Sprintf("invalid input for tool %s: %v", block.Name, err))
+	}
+	if validator, ok := tool.(types.ToolInputValidator); ok {
+		if err := validator.ValidateInput(block.Input); err != nil {
+			return e.toolErrorOutcome(block, fmt.Sprintf("invalid input for tool %s: %v", block.Name, err))
+		}
+	}
+
+	if e.config.CanUseTool != nil {
+		decision, err := e.config.CanUseTool(ctx, block.Name, block.Input)
+		if err != nil {
+			return e.toolErrorOutcome(block, err.Error())
+		}
+		if decision != nil && decision.Behavior != types.PermissionBehaviorAllow {
+			message := decision.Message
+			if message == "" {
+				message = fmt.Sprintf("permission %s for tool %s", decision.Behavior, block.Name)
+			}
+			return e.toolErrorOutcome(block, message)
+		}
+	}
+
+	toolCtx := &types.ToolContext{
+		ToolUseId:       block.ID,
+		AbortController: e.abortController,
+		ReadFileState:   e.readFileState,
+		Messages:        append([]types.Message(nil), e.mutableMessages...),
+		Options: types.ToolOptions{
+			Commands:           e.config.Commands,
+			Debug:              e.config.Verbose,
+			MainLoopModel:      e.getModel(),
+			Tools:              e.config.Tools,
+			Verbose:            e.config.Verbose,
+			MaxBudgetUsd:       e.config.MaxBudgetUsd,
+			CustomSystemPrompt: e.config.CustomSystemPrompt,
+			AppendSystemPrompt: e.config.AppendSystemPrompt,
+		},
+		GetAppState: func() interface{} {
+			if e.config.GetAppState == nil {
+				return nil
+			}
+			return e.config.GetAppState()
+		},
+	}
+
+	result, err := tool.Call(ctx, block.Input, toolCtx, e.config.CanUseTool, nil, onProgress)
+	if err != nil {
+		return e.toolErrorOutcome(block, err.Error())
+	}
+	if result == nil {
+		return e.toolErrorOutcome(block, fmt.Sprintf("tool %s returned no result", block.Name))
+	}
+
+	content := formatToolOutput(result.Output)
+	if result.Error != nil {
+		content = result.Error.Error()
+	}
+	content, truncated, originalChars := limitToolResult(content, tool.MaxResultSizeChars())
+	return newToolExecutionOutcome(e.sessionID, block.Name, block.ID, content, result.Error != nil, truncated, originalChars)
+}
+
+func (e *QueryEngine) emitToolProgress(
+	ctx context.Context,
+	output chan<- interface{},
+	block api.ContentBlock,
+	progress interface{},
+) {
+	e.emitSDKMessage(ctx, output, toolProgressSDKMessage(e.sessionID, block.Name, block.ID, progress))
+}
+
+func (e *QueryEngine) emitSDKMessage(ctx context.Context, output chan<- interface{}, message SDKMessage) {
+	select {
+	case output <- message:
+	case <-ctx.Done():
+	}
+}
+
+func formatToolOutput(output interface{}) string {
+	switch value := output.(type) {
+	case string:
+		return value
+	case []byte:
+		return string(value)
+	case nil:
+		return "<nil>"
+	default:
+		if encoded, err := json.Marshal(value); err == nil {
+			return string(encoded)
+		}
+		return fmt.Sprintf("%v", value)
+	}
+}
+
+func limitToolResult(content string, toolLimit int) (string, bool, int) {
+	limit := constants.DefaultMaxResultSizeChars
+	if toolLimit > 0 && toolLimit < limit {
+		limit = toolLimit
+	}
+	runes := []rune(content)
+	if len(runes) <= limit {
+		return content, false, len(runes)
+	}
+
+	originalChars := len(runes)
+	marker := []rune(fmt.Sprintf("\n[truncated %d→%d chars; rerun with a narrower query or range]", originalChars, limit))
+	keep := limit - len(marker)
+	if keep < 0 {
+		keep = 0
+		marker = marker[:limit]
+	}
+	return string(runes[:keep]) + string(marker), true, originalChars
+}
+
+func truncateToolResultToLimit(content string, limit, originalChars int) string {
+	runes := []rune(content)
+	if len(runes) <= limit {
+		return content
+	}
+	marker := []rune(fmt.Sprintf("\n[truncated %d→%d chars by per-turn tool result budget; rerun with a narrower query or range]", originalChars, limit))
+	keep := limit - len(marker)
+	if keep < 0 {
+		keep = 0
+		marker = marker[:limit]
+	}
+	return string(runes[:keep]) + string(marker)
+}
+
+func applyToolResultAggregateBudget(outcomes []toolExecutionOutcome, limit int) {
+	if limit <= 0 {
+		return
+	}
+	total := 0
+	for i := range outcomes {
+		total += len([]rune(outcomes[i].content))
+	}
+	for total > limit {
+		largest := -1
+		largestSize := 0
+		for i := range outcomes {
+			size := len([]rune(outcomes[i].content))
+			if size > largestSize {
+				largest, largestSize = i, size
+			}
+		}
+		if largest < 0 || largestSize == 0 {
+			break
+		}
+		target := largestSize - (total - limit)
+		if target < 0 {
+			target = 0
+		}
+		outcome := &outcomes[largest]
+		outcome.content = truncateToolResultToLimit(outcome.content, target, outcome.originalChars)
+		outcome.truncated = true
+		total = total - largestSize + len([]rune(outcome.content))
+		outcome.rebuild()
+	}
+}
+
+func validateToolInput(input json.RawMessage, schema types.ToolInputJSONSchema) error {
+	if len(input) == 0 {
+		input = json.RawMessage(`{}`)
+	}
+	var value interface{}
+	if err := json.Unmarshal(input, &value); err != nil {
+		return fmt.Errorf("expected a JSON object: %w", err)
+	}
+	return validateJSONSchemaValue("", value, map[string]interface{}{
+		"type":       schema.Type,
+		"properties": schema.Properties,
+		"required":   schema.Required,
+	})
+}
+
+func validateJSONSchemaValue(path string, value interface{}, schema map[string]interface{}) error {
+	expectedType, _ := schema["type"].(string)
+	if expectedType != "" && !matchesJSONSchemaType(value, expectedType) {
+		if path == "" && expectedType == "object" {
+			return fmt.Errorf("expected a JSON object")
+		}
+		return fmt.Errorf("field %q must be %s", path, expectedType)
+	}
+	if value == nil {
+		return nil
+	}
+	if enum, ok := schemaValues(schema["enum"]); ok {
+		matched := false
+		for _, allowed := range enum {
+			if schemaValuesEqual(value, allowed) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("field %q must be one of %v", path, enum)
+		}
+	}
+
+	switch typed := value.(type) {
+	case string:
+		length := float64(len([]rune(typed)))
+		if minimum, ok := schemaNumber(schema["minLength"]); ok && length < minimum {
+			return fmt.Errorf("field %q must contain at least %g characters", path, minimum)
+		}
+		if maximum, ok := schemaNumber(schema["maxLength"]); ok && length > maximum {
+			return fmt.Errorf("field %q must contain at most %g characters", path, maximum)
+		}
+		if pattern, ok := schema["pattern"].(string); ok && pattern != "" {
+			compiled, err := regexp.Compile(pattern)
+			if err != nil {
+				return fmt.Errorf("field %q has invalid schema pattern: %w", path, err)
+			}
+			if !compiled.MatchString(typed) {
+				return fmt.Errorf("field %q must match pattern %q", path, pattern)
+			}
+		}
+	case float64:
+		if minimum, ok := schemaNumber(schema["minimum"]); ok && typed < minimum {
+			return fmt.Errorf("field %q must be >= %g", path, minimum)
+		}
+		if maximum, ok := schemaNumber(schema["maximum"]); ok && typed > maximum {
+			return fmt.Errorf("field %q must be <= %g", path, maximum)
+		}
+		if minimum, ok := schemaNumber(schema["exclusiveMinimum"]); ok && typed <= minimum {
+			return fmt.Errorf("field %q must be > %g", path, minimum)
+		}
+		if maximum, ok := schemaNumber(schema["exclusiveMaximum"]); ok && typed >= maximum {
+			return fmt.Errorf("field %q must be < %g", path, maximum)
+		}
+	case []interface{}:
+		if minimum, ok := schemaNumber(schema["minItems"]); ok && float64(len(typed)) < minimum {
+			return fmt.Errorf("field %q must contain at least %g items", path, minimum)
+		}
+		if maximum, ok := schemaNumber(schema["maxItems"]); ok && float64(len(typed)) > maximum {
+			return fmt.Errorf("field %q must contain at most %g items", path, maximum)
+		}
+		if itemSchema, ok := schemaMap(schema["items"]); ok {
+			for index, item := range typed {
+				if err := validateJSONSchemaValue(fmt.Sprintf("%s[%d]", path, index), item, itemSchema); err != nil {
+					return err
+				}
+			}
+		}
+	case map[string]interface{}:
+		required, _ := schemaValues(schema["required"])
+		for _, item := range required {
+			name, ok := item.(string)
+			if !ok {
+				continue
+			}
+			if field, exists := typed[name]; !exists || field == nil {
+				if path == "" {
+					return fmt.Errorf("missing required field %q", name)
+				}
+				return fmt.Errorf("field %q missing required field %q", path, name)
+			}
+		}
+		properties := schemaProperties(schema["properties"])
+		for name, field := range typed {
+			definition, exists := properties[name]
+			if !exists {
+				if allowed, ok := schema["additionalProperties"].(bool); ok && !allowed {
+					return fmt.Errorf("field %q is not allowed", joinSchemaPath(path, name))
+				}
+				continue
+			}
+			if err := validateJSONSchemaValue(joinSchemaPath(path, name), field, definition); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func matchesJSONSchemaType(value interface{}, expectedType string) bool {
+	switch expectedType {
+	case "string":
+		_, ok := value.(string)
+		return ok
+	case "boolean":
+		_, ok := value.(bool)
+		return ok
+	case "number":
+		_, ok := value.(float64)
+		return ok
+	case "integer":
+		number, ok := value.(float64)
+		return ok && math.Trunc(number) == number
+	case "array":
+		_, ok := value.([]interface{})
+		return ok
+	case "object":
+		_, ok := value.(map[string]interface{})
+		return ok
+	default:
+		// Unknown types remain the tool's responsibility.
+		return true
+	}
+}
+
+func schemaMap(value interface{}) (map[string]interface{}, bool) {
+	result, ok := value.(map[string]interface{})
+	return result, ok
+}
+
+func schemaProperties(value interface{}) map[string]map[string]interface{} {
+	if properties, ok := value.(map[string]map[string]interface{}); ok {
+		return properties
+	}
+	result := make(map[string]map[string]interface{})
+	if properties, ok := value.(map[string]interface{}); ok {
+		for name, definition := range properties {
+			if mapped, ok := definition.(map[string]interface{}); ok {
+				result[name] = mapped
+			}
+		}
+	}
+	return result
+}
+
+func schemaValues(value interface{}) ([]interface{}, bool) {
+	switch values := value.(type) {
+	case []interface{}:
+		return values, true
+	case []string:
+		result := make([]interface{}, len(values))
+		for index := range values {
+			result[index] = values[index]
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
+func schemaNumber(value interface{}) (float64, bool) {
+	switch number := value.(type) {
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	case float32:
+		return float64(number), true
+	case float64:
+		return number, true
+	default:
+		return 0, false
+	}
+}
+
+func schemaValuesEqual(left, right interface{}) bool {
+	leftNumber, leftIsNumber := schemaNumber(left)
+	rightNumber, rightIsNumber := schemaNumber(right)
+	if leftIsNumber && rightIsNumber {
+		return leftNumber == rightNumber
+	}
+	return reflect.DeepEqual(left, right)
+}
+
+func joinSchemaPath(parent, child string) string {
+	if parent == "" {
+		return child
+	}
+	return parent + "." + child
+}
+
+func (e *QueryEngine) toolErrorOutcome(block api.ContentBlock, message string) toolExecutionOutcome {
+	return newToolExecutionOutcome(e.sessionID, block.Name, block.ID, message, true, false, len([]rune(message)))
+}
+
+func newToolExecutionOutcome(sessionID, toolName, toolUseID, content string, isError, truncated bool, originalChars int) toolExecutionOutcome {
+	outcome := toolExecutionOutcome{
+		toolName: toolName, toolUseID: toolUseID, content: content,
+		isError: isError, truncated: truncated, originalChars: originalChars,
+	}
+	outcome.rebuildWithSession(sessionID)
+	return outcome
+}
+
+func (o *toolExecutionOutcome) rebuild() {
+	sessionID := o.sdkMessage.SessionID
+	o.rebuildWithSession(sessionID)
+}
+
+func (o *toolExecutionOutcome) rebuildWithSession(sessionID string) {
+	block := map[string]interface{}{
+		"type": "tool_result", "tool_use_id": o.toolUseID, "content": o.content,
+	}
+	if o.isError {
+		block["is_error"] = true
+	}
+	o.message = types.Message{Role: "user", Content: mustMarshalJSON([]map[string]interface{}{block})}
+	o.sdkMessage = toolResultSDKMessage(sessionID, o.toolName, o.toolUseID, o.content, o.isError, o.truncated, o.originalChars)
 }
 
 func mergeToolResultMessages(messages []types.Message) []types.Message {
@@ -848,14 +1357,34 @@ func toolErrorMessage(toolUseID, message string) types.Message {
 	}})}
 }
 
-func toolResultSDKMessage(sessionID, toolName, toolUseID, content string, isError bool) SDKMessage {
+func toolResultSDKMessage(
+	sessionID, toolName, toolUseID, content string,
+	isError, truncated bool,
+	originalChars int,
+) SDKMessage {
 	return SDKMessage{
 		Type: "tool_result",
 		Message: map[string]interface{}{
+			"tool_name":      toolName,
+			"tool_use_id":    toolUseID,
+			"content":        content,
+			"is_error":       isError,
+			"truncated":      truncated,
+			"original_chars": originalChars,
+		},
+		SessionID: sessionID,
+		UUID:      generateUUID(),
+		Timestamp: time.Now().UnixMilli(),
+	}
+}
+
+func toolProgressSDKMessage(sessionID, toolName, toolUseID string, progress interface{}) SDKMessage {
+	return SDKMessage{
+		Type: "tool_progress",
+		Message: map[string]interface{}{
 			"tool_name":   toolName,
 			"tool_use_id": toolUseID,
-			"content":     content,
-			"is_error":    isError,
+			"data":        progress,
 		},
 		SessionID: sessionID,
 		UUID:      generateUUID(),

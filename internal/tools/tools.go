@@ -969,14 +969,64 @@ func (t *MultiEditTool) Call(ctx context.Context, args json.RawMessage, toolCtx 
 // Registry manages all available tools.
 type Registry struct {
 	tools          map[string]types.Tool
+	order          []string
+	options        RegistryOptions
 	todoTool       *TodoWriteTool
 	taskCreateTool *TaskCreateTool
 }
 
+// RegistryOptions controls which registered tools are exposed to the model.
+// Registration stays stable for prompt-cache and tool-search consistency;
+// policy is applied only when producing the enabled tool pool.
+type RegistryOptions struct {
+	SimpleMode    bool
+	DisabledTools map[string]bool
+}
+
+// ToolCapability describes why a registered tool is or is not reachable.
+type ToolCapability struct {
+	Name    string
+	Enabled bool
+	Gate    string
+}
+
+// RegistryOptionsFromEnv builds the runtime tool policy used by the CLI.
+// CLAUDE_CODE_SIMPLE mirrors the reference client's Bash/Read/Edit preset.
+// CLAUDE_CODE_DISABLE_TOOLS accepts a comma-separated list of canonical names.
+func RegistryOptionsFromEnv() RegistryOptions {
+	options := RegistryOptions{
+		SimpleMode:    envTruthy(os.Getenv("CLAUDE_CODE_SIMPLE")),
+		DisabledTools: make(map[string]bool),
+	}
+	for _, name := range strings.Split(os.Getenv("CLAUDE_CODE_DISABLE_TOOLS"), ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			options.DisabledTools[name] = true
+		}
+	}
+	return options
+}
+
+func envTruthy(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // NewToolRegistry creates a new tool registry.
 func NewToolRegistry() *Registry {
+	return NewToolRegistryWithOptions(RegistryOptions{})
+}
+
+// NewToolRegistryWithOptions creates the complete stable registry and applies
+// runtime exposure policy when ListEnabled is requested.
+func NewToolRegistryWithOptions(options RegistryOptions) *Registry {
 	r := &Registry{
-		tools: make(map[string]types.Tool),
+		tools:   make(map[string]types.Tool),
+		order:   make([]string, 0),
+		options: options,
 	}
 
 	// Register core file tools
@@ -1035,6 +1085,9 @@ func NewToolRegistry() *Registry {
 
 // Register adds a tool to the registry.
 func (r *Registry) Register(tool types.Tool) {
+	if _, exists := r.tools[tool.Name()]; !exists {
+		r.order = append(r.order, tool.Name())
+	}
 	r.tools[tool.Name()] = tool
 	for _, alias := range tool.Aliases() {
 		r.tools[alias] = tool
@@ -1049,12 +1102,10 @@ func (r *Registry) Get(name string) (types.Tool, bool) {
 
 // List returns all registered tools.
 func (r *Registry) List() []types.Tool {
-	result := make([]types.Tool, 0, len(r.tools))
-	seen := make(map[string]bool)
-	for _, tool := range r.tools {
-		if !seen[tool.Name()] {
+	result := make([]types.Tool, 0, len(r.order))
+	for _, name := range r.order {
+		if tool, ok := r.tools[name]; ok {
 			result = append(result, tool)
-			seen[tool.Name()] = true
 		}
 	}
 	return result
@@ -1063,14 +1114,39 @@ func (r *Registry) List() []types.Tool {
 // ListEnabled returns all enabled tools.
 func (r *Registry) ListEnabled() []types.Tool {
 	result := make([]types.Tool, 0)
-	seen := make(map[string]bool)
-	for _, tool := range r.tools {
-		if !seen[tool.Name()] && tool.IsEnabled() {
+	for _, tool := range r.List() {
+		if enabled, _ := r.toolEnabled(tool); enabled {
 			result = append(result, tool)
-			seen[tool.Name()] = true
 		}
 	}
 	return result
+}
+
+// Capabilities returns a stable matrix for diagnostics and regression tests.
+func (r *Registry) Capabilities() []ToolCapability {
+	result := make([]ToolCapability, 0, len(r.order))
+	for _, tool := range r.List() {
+		enabled, gate := r.toolEnabled(tool)
+		result = append(result, ToolCapability{Name: tool.Name(), Enabled: enabled, Gate: gate})
+	}
+	return result
+}
+
+func (r *Registry) toolEnabled(tool types.Tool) (bool, string) {
+	if !tool.IsEnabled() {
+		return false, "implementation"
+	}
+	if r.options.DisabledTools[tool.Name()] {
+		return false, "disabled_tools"
+	}
+	if r.options.SimpleMode {
+		switch tool.Name() {
+		case constants.ToolBash, constants.ToolFileRead, constants.ToolFileEdit:
+		default:
+			return false, "simple_mode"
+		}
+	}
+	return true, ""
 }
 
 // GetTodoTool returns the todo tool instance

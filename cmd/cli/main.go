@@ -21,6 +21,7 @@ var (
 	providerFlag   string
 	baseURLFlag    string
 	permissionFlag string
+	maxTokensFlag  int
 	maxTurnsFlag   int
 )
 
@@ -57,6 +58,7 @@ func init() {
 	rootCmd.Flags().StringVar(&providerFlag, "provider", "", "API provider: anthropic or openai")
 	rootCmd.Flags().StringVar(&baseURLFlag, "base-url", "", "Override the provider API base URL")
 	rootCmd.Flags().StringVar(&permissionFlag, "permission-mode", "", "Permission mode (default, acceptEdits, bypassPermissions)")
+	rootCmd.Flags().IntVar(&maxTokensFlag, "max-tokens", 4096, "Maximum output tokens per API response")
 	rootCmd.Flags().IntVar(&maxTurnsFlag, "max-turns", 100, "Maximum number of conversation turns")
 
 	// Add subcommands
@@ -111,6 +113,7 @@ func runMain(cmd *cobra.Command, args []string) {
 		Provider:       providerFlag,
 		BaseURL:        baseURLFlag,
 		PermissionMode: permissionFlag,
+		MaxTokens:      maxTokensFlag,
 		MaxTurns:       maxTurnsFlag,
 	}
 

@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"claude-code-go/internal/commands"
+	"claude-code-go/internal/memory"
 	"claude-code-go/internal/query"
 	"claude-code-go/internal/state"
 	"claude-code-go/internal/tools"
@@ -36,6 +37,7 @@ type App struct {
 	permissionRequests chan ui.PermissionRequest
 	permissionUI       bool
 	printStreamActive  bool
+	memoryDir          string
 }
 
 // Config holds CLI configuration.
@@ -167,14 +169,29 @@ func (a *App) Initialize() error {
 	}
 
 	// Initialize query engine
+	memoryContext, err := memory.Load(cwd)
+	if err != nil && a.config.Debug {
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize memory: %v\n", err)
+	}
+	a.memoryDir = memoryContext.Directory
+	var sessionMemory *memory.SessionMemory
+	if memory.SessionMemoryEnabled() && !a.config.PrintMode {
+		sessionMemory, err = memory.NewSessionMemory(cwd, a.stateManager.GetSessionID(), memory.DefaultSessionMemoryConfig)
+		if err != nil && a.config.Debug {
+			fmt.Fprintf(os.Stderr, "Warning: failed to initialize session memory: %v\n", err)
+		}
+	}
 	queryConfig := query.QueryEngineConfig{
-		SessionID:  a.stateManager.GetSessionID(),
-		Cwd:        cwd,
-		Tools:      a.toolRegistry.ListEnabled(),
-		MaxTokens:  a.config.MaxTokens,
-		MaxTurns:   a.config.MaxTurns,
-		APIClient:  a.apiClient,
-		CanUseTool: a.canUseTool,
+		SessionID:       a.stateManager.GetSessionID(),
+		Cwd:             cwd,
+		Tools:           a.toolRegistry.ListEnabled(),
+		MaxTokens:       a.config.MaxTokens,
+		MaxTurns:        a.config.MaxTurns,
+		APIClient:       a.apiClient,
+		CanUseTool:      a.canUseTool,
+		MemoryPrompt:    memoryContext.Prompt,
+		MemoryDirectory: memoryContext.Directory,
+		SessionMemory:   sessionMemory,
 		GetAppState: func() *types.AppState {
 			return &types.AppState{
 				MainLoopModel: a.config.Model,
@@ -285,6 +302,9 @@ func (a *App) submitInteractiveInput(ctx context.Context, input string) (<-chan 
 	if !ok {
 		return a.queryEngine.SubmitMessage(ctx, input)
 	}
+	if cmdName == "compact" {
+		return a.queryEngine.Compact(ctx, args)
+	}
 
 	output := make(chan interface{}, 1)
 	go func() {
@@ -356,11 +376,26 @@ func (a *App) canUseTool(ctx context.Context, toolName string, input json.RawMes
 		return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
 	}
 	pathsWithinCwd := true
+	pathsWithinMemory := false
 	if provider, ok := tool.(types.ToolPathProvider); ok {
-		for _, target := range provider.InputPaths(input) {
+		paths := provider.InputPaths(input)
+		pathsWithinMemory = a.memoryDir != "" && len(paths) > 0
+		for _, target := range paths {
 			if !tools.IsPathWithin(a.config.Cwd, target) {
 				pathsWithinCwd = false
-				break
+			}
+			if a.memoryDir == "" || !tools.IsPathWithin(a.memoryDir, target) {
+				pathsWithinMemory = false
+			}
+		}
+	}
+	if pathsWithinMemory {
+		switch tool.Name() {
+		case "Read":
+			return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
+		case "Write", "Edit":
+			if mode != types.PermissionModePlan && mode != types.PermissionModeDontAsk {
+				return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
 			}
 		}
 	}
@@ -456,10 +491,14 @@ func (a *App) registerCommands() {
 	a.registry.Register(commands.NewConfigCommand())
 	a.registry.Register(commands.NewCostCommand())
 	a.registry.Register(commands.NewThemeCommand())
+	a.registry.Register(commands.NewCompactCommand())
 }
 
 // Shutdown cleans up resources.
 func (a *App) Shutdown() {
+	if a.queryEngine != nil {
+		a.queryEngine.WaitForSessionMemory(a.ctx)
+	}
 	if a.cancel != nil {
 		a.cancel()
 	}

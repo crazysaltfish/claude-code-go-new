@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"claude-code-go/internal/commands"
 	"claude-code-go/internal/tools"
 	"claude-code-go/internal/types"
 )
@@ -55,6 +56,59 @@ func TestAcceptEditsDoesNotAutoApproveOutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestMemoryFileToolsAreAllowedOnlyInsideMemoryDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	memoryDir := t.TempDir()
+	app := &App{
+		config:       &Config{Cwd: workspace, PermissionMode: string(types.PermissionModeDefault)},
+		toolRegistry: tools.NewToolRegistry(),
+		permissionUI: false,
+		memoryDir:    memoryDir,
+	}
+
+	inside, _ := json.Marshal(map[string]string{
+		"file_path": filepath.Join(memoryDir, "preference.md"),
+		"contents":  "remember this",
+	})
+	decision, err := app.canUseTool(context.Background(), "Write", inside)
+	if err != nil || decision.Behavior != types.PermissionBehaviorAllow {
+		t.Fatalf("memory write decision = %#v, err=%v", decision, err)
+	}
+
+	outside, _ := json.Marshal(map[string]string{
+		"file_path": filepath.Join(t.TempDir(), "preference.md"),
+		"contents":  "do not write",
+	})
+	decision, err = app.canUseTool(context.Background(), "Write", outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Behavior != types.PermissionBehaviorDeny {
+		t.Fatalf("outside write decision = %#v, want deny", decision)
+	}
+}
+
+func TestPlanModeDoesNotAllowMemoryWrites(t *testing.T) {
+	memoryDir := t.TempDir()
+	app := &App{
+		config:       &Config{Cwd: t.TempDir(), PermissionMode: string(types.PermissionModePlan)},
+		toolRegistry: tools.NewToolRegistry(),
+		permissionUI: false,
+		memoryDir:    memoryDir,
+	}
+	input, _ := json.Marshal(map[string]string{
+		"file_path": filepath.Join(memoryDir, "preference.md"),
+		"contents":  "do not persist from plan mode",
+	})
+	decision, err := app.canUseTool(context.Background(), "Write", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Behavior != types.PermissionBehaviorDeny {
+		t.Fatalf("plan-mode memory write decision = %#v, want deny", decision)
+	}
+}
+
 func TestWebFetchAlwaysRequiresApproval(t *testing.T) {
 	app := &App{
 		config:       &Config{Cwd: t.TempDir(), PermissionMode: string(types.PermissionModeDefault)},
@@ -83,5 +137,13 @@ func TestBypassPermissionsCannotOverrideHardBashDenial(t *testing.T) {
 	}
 	if decision.Behavior != types.PermissionBehaviorDeny {
 		t.Fatalf("hard-denied Bash decision = %#v", decision)
+	}
+}
+
+func TestRegisterCommandsIncludesCompact(t *testing.T) {
+	app := &App{registry: commands.NewRegistry()}
+	app.registerCommands()
+	if _, ok := app.registry.Get("compact"); !ok {
+		t.Fatal("compact command was not registered")
 	}
 }

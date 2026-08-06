@@ -532,10 +532,13 @@ func GetBashToolSchema() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
+				"minLength":   1,
 				"description": "The command to execute",
 			},
 			"timeout": map[string]interface{}{
 				"type":        "number",
+				"minimum":     1,
+				"maximum":     MaxCommandTimeoutMs,
 				"description": "Timeout in milliseconds",
 			},
 			"is_background": map[string]interface{}{
@@ -679,16 +682,18 @@ func GetWebFetchToolSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"url": map[string]interface{}{
-				"type":        "string",
-				"description": "The URL to fetch (must be a fully-formed valid URL)",
+			"urls": map[string]interface{}{
+				"type":        "array",
+				"minItems":    1,
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "HTTPS URLs to fetch",
 			},
 			"prompt": map[string]interface{}{
 				"type":        "string",
 				"description": "The prompt describing what information to extract from the page",
 			},
 		},
-		"required": []string{"url"},
+		"required": []string{"urls"},
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"claude-code-go/internal/tools"
 	"claude-code-go/internal/types"
 	"claude-code-go/internal/ui"
+	"claude-code-go/internal/utils"
 	"claude-code-go/pkg/api"
 )
 
@@ -333,13 +334,40 @@ func (a *App) canUseTool(ctx context.Context, toolName string, input json.RawMes
 	if mode == "" {
 		mode = types.PermissionModeDefault
 	}
+	riskReason := ""
+	if tool.Name() == "Bash" {
+		var bashInput struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(input, &bashInput); err == nil {
+			securityResult := utils.BashCommandIsSafe(bashInput.Command)
+			if securityResult.Behavior == "deny" {
+				return &types.PermissionDecision{
+					Behavior: types.PermissionBehaviorDeny,
+					Message:  fmt.Sprintf("command blocked by security policy: %s", securityResult.Message),
+				}, nil
+			}
+			if securityResult.Behavior == "ask" {
+				riskReason = securityResult.Message
+			}
+		}
+	}
 	if mode == types.PermissionModeBypassPermissions {
 		return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
 	}
-	if tool.IsReadOnly(input) {
+	pathsWithinCwd := true
+	if provider, ok := tool.(types.ToolPathProvider); ok {
+		for _, target := range provider.InputPaths(input) {
+			if !tools.IsPathWithin(a.config.Cwd, target) {
+				pathsWithinCwd = false
+				break
+			}
+		}
+	}
+	if tool.IsReadOnly(input) && pathsWithinCwd {
 		return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
 	}
-	if mode == types.PermissionModeAcceptEdits {
+	if mode == types.PermissionModeAcceptEdits && pathsWithinCwd {
 		switch tool.Name() {
 		case "Write", "Edit", "MultiEdit", "NotebookEdit":
 			return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
@@ -361,6 +389,7 @@ func (a *App) canUseTool(ctx context.Context, toolName string, input json.RawMes
 		Input:       append(json.RawMessage(nil), input...),
 		ReadOnly:    tool.IsReadOnly(input),
 		Destructive: tool.IsDestructive(input),
+		RiskReason:  riskReason,
 		Response:    response,
 	}
 	select {

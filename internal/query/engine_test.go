@@ -473,6 +473,41 @@ func TestSemanticToolValidationRunsBeforePermission(t *testing.T) {
 	}
 }
 
+func TestPathNormalizationRunsBeforePermissionAndExecution(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "input.txt"), []byte("safe"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var approvedPath string
+	engine := NewQueryEngine(QueryEngineConfig{
+		Cwd:   workspace,
+		Tools: []types.Tool{tools.NewFileReadTool()},
+		CanUseTool: func(_ context.Context, _ string, input json.RawMessage) (*types.PermissionDecision, error) {
+			var value map[string]string
+			if err := json.Unmarshal(input, &value); err != nil {
+				t.Fatal(err)
+			}
+			approvedPath = value["target_file"]
+			return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
+		},
+	})
+	outcome := engine.executeTool(context.Background(), api.ContentBlock{
+		Type: "tool_use", ID: "read", Name: "Read", Input: json.RawMessage(`{"target_file":"input.txt"}`),
+	}, nil)
+	canonicalWorkspace, err := tools.CanonicalizePath(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(canonicalWorkspace, "input.txt")
+	if approvedPath != want {
+		t.Fatalf("permission saw path %q, want canonical %q", approvedPath, want)
+	}
+	data := outcome.sdkMessage.Message.(map[string]interface{})
+	if data["is_error"] == true || !strings.Contains(data["content"].(string), "safe") {
+		t.Fatalf("normalized execution failed: %#v", data)
+	}
+}
+
 func TestExecuteToolEmitsProgressAndLimitsFinalResult(t *testing.T) {
 	tool := &observableTool{
 		BaseTool: tools.NewBaseTool("Observable", "test progress and truncation"),

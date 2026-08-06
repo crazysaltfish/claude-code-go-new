@@ -23,6 +23,7 @@ type PermissionRequest struct {
 	Input       json.RawMessage
 	ReadOnly    bool
 	Destructive bool
+	RiskReason  string
 	Response    chan bool
 }
 
@@ -190,7 +191,7 @@ func formatPermissionRequest(request PermissionRequest) string {
 		}
 	}
 
-	return fmt.Sprintf(
+	formatted := fmt.Sprintf(
 		"Permission required\nTool: %s\nImpact: %s\nRead-only: %t\nDestructive: %t\nInput:\n%s",
 		request.ToolName,
 		impact,
@@ -198,6 +199,10 @@ func formatPermissionRequest(request PermissionRequest) string {
 		request.Destructive,
 		input,
 	)
+	if request.RiskReason != "" {
+		formatted = fmt.Sprintf("%s\nSecurity note: %s", formatted, request.RiskReason)
+	}
+	return formatted
 }
 
 func (m *AppModel) waitForPermissionRequest() tea.Cmd {

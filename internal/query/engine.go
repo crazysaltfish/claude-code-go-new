@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -119,6 +120,12 @@ func NewQueryEngine(config QueryEngineConfig) *QueryEngine {
 	sessionID := config.SessionID
 	if sessionID == "" {
 		sessionID = generateSessionID()
+	}
+	if config.Cwd == "" {
+		config.Cwd, _ = os.Getwd()
+	}
+	if absolute, err := filepath.Abs(config.Cwd); err == nil {
+		config.Cwd = filepath.Clean(absolute)
 	}
 	return &QueryEngine{
 		config:          config,
@@ -457,9 +464,11 @@ func (e *QueryEngine) getModel() string {
 		return e.config.UserSpecifiedModel
 	}
 
-	appState := e.config.GetAppState()
-	if appState != nil && appState.MainLoopModel != "" {
-		return appState.MainLoopModel
+	if e.config.GetAppState != nil {
+		appState := e.config.GetAppState()
+		if appState != nil && appState.MainLoopModel != "" {
+			return appState.MainLoopModel
+		}
 	}
 
 	return "claude-sonnet-4-20250514" // Default model
@@ -870,6 +879,13 @@ func (e *QueryEngine) executeTool(
 		message := fmt.Sprintf("Unknown tool: %s", block.Name)
 		return e.toolErrorOutcome(block, message)
 	}
+	if normalizer, ok := tool.(types.ToolInputNormalizer); ok {
+		normalized, err := normalizer.NormalizeInput(block.Input, e.config.Cwd)
+		if err != nil {
+			return e.toolErrorOutcome(block, fmt.Sprintf("invalid input for tool %s: %v", block.Name, err))
+		}
+		block.Input = normalized
+	}
 	if err := validateToolInput(block.Input, tool.InputSchema()); err != nil {
 		return e.toolErrorOutcome(block, fmt.Sprintf("invalid input for tool %s: %v", block.Name, err))
 	}
@@ -895,6 +911,7 @@ func (e *QueryEngine) executeTool(
 
 	toolCtx := &types.ToolContext{
 		ToolUseId:       block.ID,
+		Cwd:             e.config.Cwd,
 		AbortController: e.abortController,
 		ReadFileState:   e.readFileState,
 		Messages:        append([]types.Message(nil), e.mutableMessages...),

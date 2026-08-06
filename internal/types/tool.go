@@ -22,6 +22,7 @@ type ToolResult struct {
 // ToolContext provides context for tool execution.
 type ToolContext struct {
 	Options         ToolOptions
+	Cwd             string
 	AbortController *AbortController
 	ReadFileState   FileStateCache
 	GetAppState     func() interface{}
@@ -84,6 +85,17 @@ type Tool interface {
 // that do not fit the compact JSON Schema representation.
 type ToolInputValidator interface {
 	ValidateInput(input json.RawMessage) error
+}
+
+// ToolInputNormalizer canonicalizes security-sensitive input before validation,
+// permission display, and execution so all three stages see identical values.
+type ToolInputNormalizer interface {
+	NormalizeInput(input json.RawMessage, cwd string) (json.RawMessage, error)
+}
+
+// ToolPathProvider exposes canonical filesystem targets to permission policy.
+type ToolPathProvider interface {
+	InputPaths(input json.RawMessage) []string
 }
 
 // CanUseToolFunc is a function type for checking tool permissions.

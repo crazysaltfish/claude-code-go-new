@@ -21,6 +21,7 @@ func TestFormatPermissionRequestShowsCompleteInput(t *testing.T) {
 		Input:       input,
 		ReadOnly:    false,
 		Destructive: true,
+		RiskReason:  "Command contains command substitution",
 	})
 
 	for _, want := range []string{
@@ -31,6 +32,7 @@ func TestFormatPermissionRequestShowsCompleteInput(t *testing.T) {
 		`"command": "printf `,
 		`"paths": [`,
 		"END-OF-COMMAND",
+		"Security note: Command contains command substitution",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("formatted approval does not contain %q:\n%s", want, got)

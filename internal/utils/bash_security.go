@@ -272,7 +272,7 @@ func ValidateObfuscatedFlags(command string) BashSecurityCheckResult {
 	}
 
 	// Check for Unicode whitespace
-	unicodeWhitespace := regexp.MustCompile(`[\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]`)
+	unicodeWhitespace := regexp.MustCompile(`[\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}]`)
 	if unicodeWhitespace.MatchString(command) {
 		return BashSecurityCheckResult{
 			Behavior: "ask",

@@ -178,7 +178,9 @@ func (t *BashTool) Call(ctx context.Context, args json.RawMessage, toolCtx *type
 	}
 
 	cmd := exec.CommandContext(execCtx, shell, shellFlag, input.Command)
-	if cwd, err := os.Getwd(); err == nil {
+	if toolCtx != nil && toolCtx.Cwd != "" {
+		cmd.Dir = toolCtx.Cwd
+	} else if cwd, err := os.Getwd(); err == nil {
 		cmd.Dir = cwd
 	}
 
@@ -634,7 +636,7 @@ func NewWebFetchTool() *WebFetchTool {
 			description: constants.DescWebFetch,
 			inputSchema: convertSchema(constants.GetWebFetchToolSchema()),
 			isEnabled:   true,
-			isReadOnly:  true,
+			isReadOnly:  false,
 		},
 	}
 }
@@ -649,18 +651,13 @@ func (t *WebFetchTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 	}
 
 	var results []string
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := newSecureWebClient()
 
 	for _, rawURL := range input.URLs {
-		// Ensure HTTPS
 		parsedURL, err := url.Parse(rawURL)
 		if err != nil {
 			results = append(results, fmt.Sprintf("Error: invalid URL %s: %v", rawURL, err))
 			continue
-		}
-
-		if parsedURL.Scheme == "http" {
-			parsedURL.Scheme = "https"
 		}
 
 		req, err := http.NewRequestWithContext(ctx, "GET", parsedURL.String(), nil)
@@ -675,11 +672,14 @@ func (t *WebFetchTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 			results = append(results, fmt.Sprintf("Error: failed to fetch %s: %v", rawURL, err))
 			continue
 		}
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxWebResponseBytes+1))
+		resp.Body.Close()
 		if err != nil {
 			results = append(results, fmt.Sprintf("Error: failed to read response from %s: %v", rawURL, err))
+			continue
+		}
+		if len(body) > maxWebResponseBytes {
+			results = append(results, fmt.Sprintf("Error: response from %s exceeds %d bytes", rawURL, maxWebResponseBytes))
 			continue
 		}
 
@@ -688,6 +688,7 @@ func (t *WebFetchTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 		if strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
 			content = htmlToMarkdown(content)
 		}
+		content = SanitizeUntrustedText(content)
 
 		results = append(results, fmt.Sprintf("=== %s ===\n%s", rawURL, content))
 	}
@@ -696,6 +697,21 @@ func (t *WebFetchTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 		Output:    strings.Join(results, "\n\n"),
 		ToolUseID: toolCtx.ToolUseId,
 	}, nil
+}
+
+func (t *WebFetchTool) ValidateInput(args json.RawMessage) error {
+	var input struct {
+		URLs []string `json:"urls"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return err
+	}
+	for _, rawURL := range input.URLs {
+		if err := validatePublicHTTPSURL(rawURL); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // htmlToMarkdown converts basic HTML to markdown-like format

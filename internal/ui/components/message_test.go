@@ -4,11 +4,80 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
 
 	"claude-code-go/internal/types"
 )
+
+func TestWrapTextPreservesUnicodeAndDisplayWidth(t *testing.T) {
+	input := "中文🙂alpha世界"
+	wrapped := wrapText(input, 6)
+	if !utf8.ValidString(wrapped) {
+		t.Fatalf("wrapped text is invalid UTF-8: %q", wrapped)
+	}
+	if got := strings.ReplaceAll(wrapped, "\n", ""); got != input {
+		t.Fatalf("wrapping changed content: got %q want %q", got, input)
+	}
+	for _, line := range strings.Split(wrapped, "\n") {
+		if width := runewidth.StringWidth(line); width > 6 {
+			t.Fatalf("wrapped line width = %d, want <= 6: %q", width, line)
+		}
+	}
+}
+
+func TestTerminalTextSanitizationRemovesEscapeAndControlSequences(t *testing.T) {
+	input := "safe\x1b[31mred\x1b[0m\x1b]52;c;c2VjcmV0\x07\r\x00\ttail\n中文"
+	got := sanitizeTerminalText(input)
+	if strings.ContainsAny(got, "\x1b\x07\r\x00") {
+		t.Fatalf("sanitized text contains terminal control bytes: %q", got)
+	}
+	if strings.Contains(got, "c2VjcmV0") {
+		t.Fatalf("sanitized text retained OSC payload: %q", got)
+	}
+	if want := "safered\ttail\n中文"; got != want {
+		t.Fatalf("sanitized text = %q, want %q", got, want)
+	}
+}
+
+func TestToolRenderingSanitizesUntrustedTerminalText(t *testing.T) {
+	block := ContentBlock{
+		Type:    "tool",
+		Name:    "Bash",
+		Status:  "completed",
+		Summary: "done\x1b]0;forged title\x07",
+		Content: "output\x1b[31mred\x1b[0m",
+	}
+	view := renderMessageWithMode(MessageModel{Role: "tool", Content: []ContentBlock{block}}, 80, TranscriptVerbose)
+	if strings.ContainsAny(view, "\x1b\x07") || strings.Contains(view, "forged title") {
+		t.Fatalf("tool rendering retained terminal escape data: %q", view)
+	}
+	if !strings.Contains(view, "outputred") {
+		t.Fatalf("tool rendering lost printable output: %q", view)
+	}
+}
+
+func TestLiveUpdatesPreserveScrolledTranscriptAnchor(t *testing.T) {
+	list := NewMessageList(60, 8)
+	for i := 1; i <= 8; i++ {
+		list.AddMessage(MessageModel{Role: "assistant", Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf("message-%d", i)}}})
+	}
+	list.PageUp()
+	before := list.View()
+	if list.ScrollOffset == 0 {
+		t.Fatal("test setup did not scroll above latest content")
+	}
+
+	list.AppendAssistantDelta("streamed\ncontent\nwith\nnew lines")
+	if list.ScrollOffset == 0 {
+		t.Fatal("stream update snapped the transcript to the bottom")
+	}
+	if after := list.View(); after != before {
+		t.Fatalf("stream update moved the visible history anchor:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
 
 func TestMessageListScrollsRenderedConversationLines(t *testing.T) {
 	list := NewMessageList(60, 8)
@@ -191,6 +260,28 @@ func TestCompletionSummaryListsChangedArtifacts(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("completion summary missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestCompletionSummaryOnlyListsCurrentTurnArtifacts(t *testing.T) {
+	model := NewChatModel(100, 40)
+	model.AddUserMessage("first change")
+	model.AddToolUse("Write", "write_1", []byte(`{"file_path":"first.txt","contents":"first"}`))
+	model.AddToolResult("Write", "write_1", "written", false, false, 7, &types.ToolDisplay{Artifacts: []string{"first.txt"}})
+	model.AddCompletionSummary("1s", "$0", 1)
+
+	model.AddUserMessage("second change")
+	model.AddToolUse("Write", "write_2", []byte(`{"file_path":"second.txt","contents":"second"}`))
+	model.AddToolResult("Write", "write_2", "written", false, false, 7, &types.ToolDisplay{Artifacts: []string{"second.txt"}})
+	model.AddCompletionSummary("1s", "$0", 1)
+
+	summary := model.Messages.Messages[len(model.Messages.Messages)-1]
+	view := RenderMessage(summary, 100)
+	if strings.Contains(view, "first.txt") {
+		t.Fatalf("second completion summary repeated a prior turn artifact:\n%s", view)
+	}
+	if !strings.Contains(view, "Changed files (1):") || !strings.Contains(view, "second.txt") {
+		t.Fatalf("second completion summary omitted its current artifact:\n%s", view)
 	}
 }
 

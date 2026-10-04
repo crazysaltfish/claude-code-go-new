@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"claude-code-go/internal/types"
 )
@@ -199,6 +200,7 @@ func renderToolCard(block ContentBlock, width int, mode TranscriptMode) string {
 	if summary == "" {
 		summary = toolCallSummary(block)
 	}
+	summary = sanitizeTerminalText(summary)
 	expanded := mode == TranscriptVerbose
 	disclosure := "▸"
 	if expanded {
@@ -375,8 +377,8 @@ func renderToolUse(block ContentBlock, width int) string {
 	// Input preview (truncated if too long)
 	if len(block.Input) > 0 {
 		inputPreview := string(block.Input)
-		if len(inputPreview) > 200 {
-			inputPreview = inputPreview[:200] + "..."
+		if runewidth.StringWidth(inputPreview) > 200 {
+			inputPreview = runewidth.Truncate(inputPreview, 200, "...")
 		}
 		b.WriteString(wrapText(inputPreview, width-2))
 	}
@@ -400,8 +402,8 @@ func renderToolResult(block ContentBlock, width int) string {
 
 	// Content preview
 	contentStr := fmt.Sprintf("%v", block.Content)
-	if len(contentStr) > 500 {
-		contentStr = contentStr[:500] + "\n... (truncated)"
+	if runewidth.StringWidth(contentStr) > 500 {
+		contentStr = runewidth.Truncate(contentStr, 500, "") + "\n... (truncated)"
 	}
 	b.WriteString(wrapText(contentStr, width-2))
 
@@ -416,8 +418,8 @@ func renderThinking(block ContentBlock, width int) string {
 
 	// Truncate thinking if too long
 	thinking := block.Thinking
-	if len(thinking) > 300 {
-		thinking = thinking[:300] + "..."
+	if runewidth.StringWidth(thinking) > 300 {
+		thinking = runewidth.Truncate(thinking, 300, "...")
 	}
 	b.WriteString(wrapText(thinking, width-2))
 
@@ -426,39 +428,11 @@ func renderThinking(block ContentBlock, width int) string {
 
 // wrapText wraps text to the specified width.
 func wrapText(text string, width int) string {
+	text = sanitizeTerminalText(text)
 	if width <= 0 {
 		return text
 	}
-
-	var result strings.Builder
-	lines := strings.Split(text, "\n")
-
-	for i, line := range lines {
-		if i > 0 {
-			result.WriteString("\n")
-		}
-
-		// Wrap long lines
-		for len(line) > width {
-			// Find a good break point
-			breakPoint := width
-			for j := width - 1; j >= 0 && j >= width-20; j-- {
-				if line[j] == ' ' || line[j] == '\t' {
-					breakPoint = j
-					break
-				}
-			}
-
-			result.WriteString(line[:breakPoint] + "\n")
-			line = line[breakPoint:]
-			if line[0] == ' ' || line[0] == '\t' {
-				line = line[1:]
-			}
-		}
-		result.WriteString(line)
-	}
-
-	return result.String()
+	return runewidth.Wrap(text, width)
 }
 
 // =============================================================================
@@ -489,20 +463,21 @@ func NewMessageList(width, height int) *MessageListModel {
 
 // AddMessage adds a message to the list.
 func (m *MessageListModel) AddMessage(msg MessageModel) {
+	restoreScroll := m.preserveScrollAnchor()
+	defer restoreScroll()
 	m.Messages = append(m.Messages, msg)
-	// Auto-scroll to bottom
-	m.ScrollOffset = 0
 }
 
 // UpsertToolUse creates or refreshes a tool card while keeping expansion state.
 func (m *MessageListModel) UpsertToolUse(toolName, toolUseID string, input json.RawMessage) {
+	restoreScroll := m.preserveScrollAnchor()
+	defer restoreScroll()
 	if block := m.findToolBlock(toolUseID); block != nil {
 		block.Name = toolName
 		block.Input = append(json.RawMessage(nil), input...)
 		if block.Status == "" {
 			block.Status = "running"
 		}
-		m.ScrollOffset = 0
 		return
 	}
 	m.AddMessage(MessageModel{Role: "tool", Content: []ContentBlock{{
@@ -513,11 +488,12 @@ func (m *MessageListModel) UpsertToolUse(toolName, toolUseID string, input json.
 
 // UpsertToolProgress keeps only the latest progress payload for each tool call.
 func (m *MessageListModel) UpsertToolProgress(toolName, toolUseID, content string) {
+	restoreScroll := m.preserveScrollAnchor()
+	defer restoreScroll()
 	if block := m.findToolBlock(toolUseID); block != nil {
 		block.Name = toolName
 		block.Status = "running"
 		block.Content = content
-		m.ScrollOffset = 0
 		return
 	}
 	for i := len(m.Messages) - 1; i >= 0; i-- {
@@ -528,7 +504,6 @@ func (m *MessageListModel) UpsertToolProgress(toolName, toolUseID, content strin
 		}
 		message.Content[0].Name = toolName
 		message.Content[0].Content = content
-		m.ScrollOffset = 0
 		return
 	}
 	m.AddMessage(MessageModel{
@@ -545,6 +520,8 @@ func (m *MessageListModel) UpsertToolProgress(toolName, toolUseID, content strin
 // CompleteToolUse updates a tool card in place, preserving the call input for
 // summaries, expandable details, and diff rendering.
 func (m *MessageListModel) CompleteToolUse(toolName, toolUseID, content string, isError, truncated bool, originalChars int, display *types.ToolDisplay) {
+	restoreScroll := m.preserveScrollAnchor()
+	defer restoreScroll()
 	block := m.findToolBlock(toolUseID)
 	if block == nil {
 		m.UpsertToolUse(toolName, toolUseID, nil)
@@ -565,7 +542,6 @@ func (m *MessageListModel) CompleteToolUse(toolName, toolUseID, content string, 
 	if isError {
 		block.Status = "error"
 	}
-	m.ScrollOffset = 0
 }
 
 func (m *MessageListModel) findToolBlock(toolUseID string) *ContentBlock {
@@ -589,9 +565,21 @@ func (m *MessageListModel) CycleTranscriptMode() TranscriptMode {
 
 // ArtifactPaths returns successful file outputs in first-seen order.
 func (m *MessageListModel) ArtifactPaths() []string {
+	return m.ArtifactPathsFrom(0)
+}
+
+// ArtifactPathsFrom returns successful file outputs at or after a message
+// index. Completion summaries use this to report only the current turn.
+func (m *MessageListModel) ArtifactPathsFrom(start int) []string {
+	if start < 0 {
+		start = 0
+	}
+	if start > len(m.Messages) {
+		start = len(m.Messages)
+	}
 	seen := make(map[string]bool)
 	var paths []string
-	for _, message := range m.Messages {
+	for _, message := range m.Messages[start:] {
 		for _, block := range message.Content {
 			if block.Type != "tool" || block.IsError || block.Status != "completed" {
 				continue
@@ -617,6 +605,8 @@ func (m *MessageListModel) ArtifactPaths() []string {
 
 // RemoveToolProgress removes the transient row once a final result arrives.
 func (m *MessageListModel) RemoveToolProgress(toolUseID string) {
+	restoreScroll := m.preserveScrollAnchor()
+	defer restoreScroll()
 	for i := len(m.Messages) - 1; i >= 0; i-- {
 		message := m.Messages[i]
 		if message.Role != "tool_progress" || len(message.Content) == 0 ||
@@ -624,7 +614,6 @@ func (m *MessageListModel) RemoveToolProgress(toolUseID string) {
 			continue
 		}
 		m.Messages = append(m.Messages[:i], m.Messages[i+1:]...)
-		m.ScrollOffset = 0
 		return
 	}
 }
@@ -635,6 +624,8 @@ func (m *MessageListModel) AppendAssistantDelta(text string) {
 	if text == "" {
 		return
 	}
+	restoreScroll := m.preserveScrollAnchor()
+	defer restoreScroll()
 	if len(m.Messages) == 0 || m.Messages[len(m.Messages)-1].Role != "assistant" ||
 		!m.Messages[len(m.Messages)-1].IsStreaming {
 		m.Messages = append(m.Messages, MessageModel{
@@ -648,13 +639,14 @@ func (m *MessageListModel) AppendAssistantDelta(text string) {
 		message.Content = append(message.Content, ContentBlock{Type: "text"})
 	}
 	message.Content[len(message.Content)-1].Text += text
-	m.ScrollOffset = 0
 }
 
 // FinalizeAssistantStream marks the active response complete. The complete
 // response text is authoritative and also supports providers that emitted no
 // text deltas.
 func (m *MessageListModel) FinalizeAssistantStream(content string) {
+	restoreScroll := m.preserveScrollAnchor()
+	defer restoreScroll()
 	if len(m.Messages) > 0 {
 		message := &m.Messages[len(m.Messages)-1]
 		if message.Role == "assistant" && message.IsStreaming {
@@ -662,7 +654,6 @@ func (m *MessageListModel) FinalizeAssistantStream(content string) {
 				message.Content = []ContentBlock{{Type: "text", Text: content}}
 			}
 			message.IsStreaming = false
-			m.ScrollOffset = 0
 			return
 		}
 	}
@@ -838,4 +829,23 @@ func (m *MessageListModel) maxScrollOffset() int {
 		return 0
 	}
 	return maxOffset
+}
+
+// preserveScrollAnchor keeps the same transcript lines visible while live
+// content changes. When already at the bottom, the viewport continues to
+// follow new output automatically.
+func (m *MessageListModel) preserveScrollAnchor() func() {
+	if m.ScrollOffset == 0 {
+		return func() {}
+	}
+	visibleEnd := len(m.renderedLines()) - m.ScrollOffset
+	return func() {
+		m.ScrollOffset = len(m.renderedLines()) - visibleEnd
+		if m.ScrollOffset < 0 {
+			m.ScrollOffset = 0
+		}
+		if maxOffset := m.maxScrollOffset(); m.ScrollOffset > maxOffset {
+			m.ScrollOffset = maxOffset
+		}
+	}
 }

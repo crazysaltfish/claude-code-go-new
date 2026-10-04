@@ -1161,15 +1161,11 @@ func (e *QueryEngine) extractToolUseBlocks(response *api.MessageResponse) []api.
 // executeTools executes tool calls and yields progress.
 func (e *QueryEngine) executeTools(ctx context.Context, blocks []api.ContentBlock, output chan<- interface{}) []types.Message {
 	outcomesInModelOrder := make([]toolExecutionOutcome, 0, len(blocks))
-	completionOrder := make([]int, 0, len(blocks))
 
 	for _, batch := range e.partitionToolCalls(blocks) {
-		baseIndex := len(outcomesInModelOrder)
 		outcomes := make([]toolExecutionOutcome, len(batch.blocks))
-		localCompletionOrder := make([]int, 0, len(batch.blocks))
 		if batch.concurrent {
 			var wg sync.WaitGroup
-			var completionMu sync.Mutex
 			wg.Add(len(batch.blocks))
 			for i, block := range batch.blocks {
 				go func(index int, toolUse api.ContentBlock) {
@@ -1177,9 +1173,7 @@ func (e *QueryEngine) executeTools(ctx context.Context, blocks []api.ContentBloc
 					outcomes[index] = e.executeTool(ctx, toolUse, func(progress interface{}) {
 						e.emitToolProgress(ctx, output, toolUse, progress)
 					})
-					completionMu.Lock()
-					localCompletionOrder = append(localCompletionOrder, index)
-					completionMu.Unlock()
+					e.emitSDKMessage(ctx, output, outcomes[index].sdkMessage)
 				}(i, block)
 			}
 			wg.Wait()
@@ -1188,25 +1182,30 @@ func (e *QueryEngine) executeTools(ctx context.Context, blocks []api.ContentBloc
 				outcomes[i] = e.executeTool(ctx, block, func(progress interface{}) {
 					e.emitToolProgress(ctx, output, block, progress)
 				})
-				localCompletionOrder = append(localCompletionOrder, i)
+				e.emitSDKMessage(ctx, output, outcomes[i].sdkMessage)
 			}
 		}
 
-		// Preserve the model's tool-call order in conversation history even when
-		// UI progress and final events arrived in completion order.
+		// UI completion events are emitted immediately above, while the model
+		// conversation still preserves the original tool-call order here.
 		for _, outcome := range outcomes {
 			outcomesInModelOrder = append(outcomesInModelOrder, outcome)
 		}
-		for _, index := range localCompletionOrder {
-			completionOrder = append(completionOrder, baseIndex+index)
-		}
+	}
+	emittedContent := make([]string, len(outcomesInModelOrder))
+	for i := range outcomesInModelOrder {
+		emittedContent[i] = outcomesInModelOrder[i].content
 	}
 	applyToolResultAggregateBudget(outcomesInModelOrder, constants.MaxToolResultsPerMessageChars)
 	results := make([]types.Message, 0, len(outcomesInModelOrder))
-	for _, index := range completionOrder {
-		e.emitSDKMessage(ctx, output, outcomesInModelOrder[index].sdkMessage)
-	}
-	for _, outcome := range outcomesInModelOrder {
+	for i, outcome := range outcomesInModelOrder {
+		// A concurrent result is shown as soon as its tool finishes. If the
+		// completed batch later exceeds the aggregate turn budget, publish the
+		// bounded replacement so the same UI card and truncation metadata settle
+		// on the exact model-facing result.
+		if outcome.content != emittedContent[i] {
+			e.emitSDKMessage(ctx, output, outcome.sdkMessage)
+		}
 		results = append(results, outcome.message)
 	}
 

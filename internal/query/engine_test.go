@@ -370,6 +370,55 @@ func TestExecuteToolsRunsSafeBatchConcurrentlyAndPreservesOrder(t *testing.T) {
 	}
 }
 
+func TestConcurrentToolCompletionIsEmittedWithoutWaitingForSlowPeer(t *testing.T) {
+	started := make(chan string, 2)
+	slowRelease := make(chan struct{})
+	fastRelease := make(chan struct{})
+	slow := newGatedTool("Slow", true, started, slowRelease)
+	fast := newGatedTool("Fast", true, started, fastRelease)
+	engine := NewQueryEngine(QueryEngineConfig{Tools: []types.Tool{slow, fast}})
+	output := make(chan interface{}, 2)
+	resultCh := make(chan []types.Message, 1)
+	go func() {
+		resultCh <- engine.executeTools(context.Background(), []api.ContentBlock{
+			{Type: "tool_use", ID: "slow_1", Name: "Slow", Input: json.RawMessage(`{}`)},
+			{Type: "tool_use", ID: "fast_1", Name: "Fast", Input: json.RawMessage(`{}`)},
+		}, output)
+	}()
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case name := <-started:
+			seen[name] = true
+		case <-time.After(time.Second):
+			t.Fatalf("tools did not start concurrently: %v", seen)
+		}
+	}
+	close(fastRelease)
+	select {
+	case event := <-output:
+		message := event.(SDKMessage)
+		data := message.Message.(map[string]interface{})
+		if message.Type != "tool_result" || data["tool_use_id"] != "fast_1" {
+			t.Fatalf("first completion event = %#v, want fast tool result", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fast tool completion waited for its slow peer")
+	}
+
+	close(slowRelease)
+	<-output
+	results := <-resultCh
+	var blocks []api.ContentBlock
+	if err := json.Unmarshal(results[0].Content, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if blocks[0].ToolUseID != "slow_1" || blocks[1].ToolUseID != "fast_1" {
+		t.Fatalf("model result order changed: %#v", blocks)
+	}
+}
+
 func TestExecuteToolsUsesUnsafeCallsAsSerialBarriers(t *testing.T) {
 	started := make(chan string, 2)
 	firstRelease := make(chan struct{})

@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // =============================================================================
@@ -165,7 +166,11 @@ func (m *InputModel) View() string {
 		b.WriteString("\n" + multilineHintStyle.Render("Shift+Enter for new line"))
 	}
 
-	return inputBoxStyle.Render(b.String())
+	innerWidth := m.Width - inputBoxStyle.GetHorizontalFrameSize()
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	return inputBoxStyle.Width(innerWidth).Render(ansi.Truncate(b.String(), innerWidth, ""))
 }
 
 // SetValue sets the input value.
@@ -233,5 +238,9 @@ func (m *MultilineInputModel) View() string {
 		b.WriteString(placeholderStyle.Render(m.Placeholder))
 	}
 
-	return inputBoxStyle.Render(b.String())
+	innerWidth := m.Width - inputBoxStyle.GetHorizontalFrameSize()
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	return inputBoxStyle.Width(innerWidth).Render(ansi.Truncate(b.String(), innerWidth, ""))
 }

@@ -6,7 +6,28 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"claude-code-go/internal/types"
 )
+
+func TestChatAndDiffViewsStayWithinNarrowTerminal(t *testing.T) {
+	model := NewChatModel(20, 16)
+	model.AddAssistantMessage("A long response with 中文 and emoji 🙂 that must wrap")
+	if width := lipgloss.Width(model.View()); width > 20 {
+		t.Fatalf("chat width = %d, want <= 20:\n%s", width, model.View())
+	}
+
+	model.AddToolUse("Edit", "edit-1", []byte(`{"file_path":"very/long/path/to/example.go"}`))
+	model.AddToolResult("Edit", "edit-1", "done", false, false, 4, &types.ToolDisplay{
+		FilePath: "very/long/path/to/example.go",
+		Diff:     "--- example.go\n+++ example.go\n-this is a very long removed line\n+this is a very long added line",
+	})
+	model.OpenDiffView()
+	if width := lipgloss.Width(model.View()); width > 20 {
+		t.Fatalf("diff width = %d, want <= 20:\n%s", width, model.View())
+	}
+}
 
 func TestCtrlOCyclesTranscriptModesAndUpdatesHeader(t *testing.T) {
 	model := NewChatModel(80, 24)

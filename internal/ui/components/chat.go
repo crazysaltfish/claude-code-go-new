@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"claude-code-go/internal/types"
 )
@@ -38,6 +39,16 @@ var (
 			Padding(0, 1)
 )
 
+const chatHorizontalFrame = 4
+
+func terminalContentWidth(width int) int {
+	width -= chatHorizontalFrame
+	if width < 1 {
+		return 1
+	}
+	return width
+}
+
 // ChatState represents the state of the chat interface.
 type ChatState int
 
@@ -62,14 +73,16 @@ type ChatModel struct {
 	ApprovalText   string
 	ApprovalOffset int
 	DiffView       *DiffViewModel
+	runStartIndex  int
 }
 
 // NewChatModel creates a new chat interface.
 func NewChatModel(width, height int) *ChatModel {
+	contentWidth := terminalContentWidth(width)
 	return &ChatModel{
-		Messages:    NewMessageList(width, height-6),
-		Input:       NewInput(">", "Type your message...", width-4),
-		Status:      NewStatusBar(width),
+		Messages:    NewMessageList(contentWidth, height-6),
+		Input:       NewInput(">", "Type your message...", contentWidth),
+		Status:      NewStatusBar(contentWidth),
 		Spinner:     NewSpinner(),
 		State:       ChatStateIdle,
 		Width:       width,
@@ -129,10 +142,11 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.Height = msg.Height
-		m.Messages.Width = msg.Width
+		contentWidth := terminalContentWidth(msg.Width)
+		m.Messages.Width = contentWidth
 		m.updateMessageViewport()
-		m.Input.Width = msg.Width - 4
-		m.Status.Width = msg.Width
+		m.Input.Width = contentWidth
+		m.Status.Width = contentWidth
 
 	case tea.KeyMsg:
 		switch msg.Type {
@@ -153,6 +167,7 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			if m.State == ChatStateIdle && m.Input.Value != "" {
 				// Add user message
+				m.runStartIndex = len(m.Messages.Messages)
 				m.Messages.AddMessage(MessageModel{
 					Role:    "user",
 					Content: []ContentBlock{{Type: "text", Text: m.Input.Value}},
@@ -192,10 +207,16 @@ func (m *ChatModel) View() string {
 		return m.DiffView.View()
 	}
 	var b strings.Builder
+	contentWidth := terminalContentWidth(m.Width)
 
 	// Header
-	b.WriteString(chatHeaderStyle.Render("Claude Code · "+m.Messages.Mode.String()) + "\n")
-	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.Width)) + "\n")
+	headerWidth := contentWidth - chatHeaderStyle.GetHorizontalFrameSize()
+	if headerWidth < 1 {
+		headerWidth = 1
+	}
+	header := runewidth.Truncate("Claude Code · "+m.Messages.Mode.String(), headerWidth, "")
+	b.WriteString(chatHeaderStyle.Render(header) + "\n")
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", contentWidth)) + "\n")
 
 	// Messages area
 	b.WriteString(m.Messages.View())
@@ -211,15 +232,15 @@ func (m *ChatModel) View() string {
 		b.WriteString(errorStyle.Render(m.Error.Error()) + "\n")
 	}
 	if m.ApprovalText != "" {
-		approvalWidth := m.Width - 6
-		if approvalWidth < 20 {
-			approvalWidth = 20
+		approvalWidth := contentWidth - approvalStyle.GetHorizontalFrameSize()
+		if approvalWidth < 1 {
+			approvalWidth = 1
 		}
 		b.WriteString(approvalStyle.Width(approvalWidth).Render(m.approvalView()) + "\n")
 	}
 
 	// Input area
-	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.Width)) + "\n")
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", contentWidth)) + "\n")
 	b.WriteString(m.Input.View() + "\n")
 
 	// Footer with help
@@ -234,7 +255,7 @@ func (m *ChatModel) View() string {
 	} else if m.HelpVisible {
 		footerText = "↑↓: input history | Ctrl+O: Normal/Verbose/Summary | /diff: changes | Ctrl+H: hide help"
 	}
-	b.WriteString(chatFooterStyle.Render(footerText))
+	b.WriteString(chatFooterStyle.Render(wrapText(footerText, contentWidth)))
 
 	return chatContainerStyle.Render(b.String())
 }
@@ -274,6 +295,7 @@ func (m *ChatModel) AbortAssistantMessage() {
 
 // AddUserMessage adds a user message.
 func (m *ChatModel) AddUserMessage(content string) {
+	m.runStartIndex = len(m.Messages.Messages)
 	m.Messages.AddMessage(MessageModel{
 		Role:    "user",
 		Content: []ContentBlock{{Type: "text", Text: content}},
@@ -291,7 +313,7 @@ func (m *ChatModel) AddSystemMessage(content string) {
 // AddCompletionSummary presents the run outcome and any produced artifacts.
 func (m *ChatModel) AddCompletionSummary(duration, cost string, turns int) {
 	content := fmt.Sprintf("Completed in %s · Cost %s · %d turns", duration, cost, turns)
-	if artifacts := m.Messages.ArtifactPaths(); len(artifacts) > 0 {
+	if artifacts := m.Messages.ArtifactPathsFrom(m.runStartIndex); len(artifacts) > 0 {
 		content += fmt.Sprintf("\nChanged files (%d):", len(artifacts))
 		for _, path := range artifacts {
 			content += "\n  • " + path
@@ -382,9 +404,9 @@ func (m *ChatModel) approvalLines() []string {
 	if m.ApprovalText == "" {
 		return nil
 	}
-	width := m.Width - 10
-	if width < 20 {
-		width = 20
+	width := terminalContentWidth(m.Width) - approvalStyle.GetHorizontalFrameSize()
+	if width < 1 {
+		width = 1
 	}
 	return strings.Split(wrapText(m.ApprovalText, width), "\n")
 }

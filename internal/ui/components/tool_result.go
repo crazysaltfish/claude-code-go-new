@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 // =============================================================================
@@ -79,17 +80,17 @@ func RenderToolResult(result ToolResultDisplay, width int) string {
 		style = toolErrorStyle
 	}
 
-	header := fmt.Sprintf("%s %s", icon, result.ToolName)
+	header := fmt.Sprintf("%s %s", icon, sanitizeTerminalText(result.ToolName))
 	b.WriteString(style.Render(header) + "\n")
 
 	// File path if present
 	if result.FilePath != "" {
-		b.WriteString(filePathStyle.Render("📁 "+result.FilePath) + "\n")
+		b.WriteString(filePathStyle.Render("📁 "+sanitizeTerminalText(result.FilePath)) + "\n")
 	}
 
 	// Output content
 	if result.Error != nil {
-		b.WriteString(toolErrorStyle.Render(result.Error.Error()) + "\n")
+		b.WriteString(toolErrorStyle.Render(sanitizeTerminalText(result.Error.Error())) + "\n")
 	} else {
 		b.WriteString(renderToolOutput(result.Output, width-4))
 	}
@@ -123,6 +124,7 @@ func renderToolOutput(output interface{}, width int) string {
 
 // renderTextOutput renders text output with syntax detection.
 func renderTextOutput(text string, width int) string {
+	text = sanitizeTerminalText(text)
 	// Detect content type and render accordingly
 	if strings.HasPrefix(text, "diff --git") || strings.HasPrefix(text, "--- ") {
 		return renderDiffOutput(text, width)
@@ -132,7 +134,7 @@ func renderTextOutput(text string, width int) string {
 		var js interface{}
 		if err := json.Unmarshal([]byte(text), &js); err == nil {
 			if pretty, err := json.MarshalIndent(js, "", "  "); err == nil {
-				return toolOutputStyle.Render(string(pretty))
+				return toolOutputStyle.Render(wrapText(string(pretty), width))
 			}
 		}
 	}
@@ -141,12 +143,17 @@ func renderTextOutput(text string, width int) string {
 
 // renderDiffOutput renders git diff output.
 func renderDiffOutput(diff string, width int) string {
+	diff = sanitizeTerminalText(diff)
 	var b strings.Builder
 	lines := strings.Split(diff, "\n")
 
 	for _, line := range lines {
 		if len(line) == 0 {
 			continue
+		}
+
+		if width > 0 {
+			line = runewidth.Truncate(line, width, "…")
 		}
 
 		switch {
@@ -172,7 +179,7 @@ func renderJSONOutput(data map[string]interface{}, width int) string {
 	if err != nil {
 		return fmt.Sprintf("%v", data)
 	}
-	return toolOutputStyle.Render(string(pretty))
+	return toolOutputStyle.Render(wrapText(string(pretty), width))
 }
 
 // renderJSONArray renders a JSON array.
@@ -181,7 +188,7 @@ func renderJSONArray(data []interface{}, width int) string {
 	if err != nil {
 		return fmt.Sprintf("%v", data)
 	}
-	return toolOutputStyle.Render(string(pretty))
+	return toolOutputStyle.Render(wrapText(string(pretty), width))
 }
 
 // =============================================================================
@@ -196,27 +203,29 @@ type ToolUseSummary struct {
 
 // Render renders a one-line summary.
 func (s *ToolUseSummary) Render() string {
+	toolName := sanitizeTerminalText(s.ToolName)
 	switch s.ToolName {
 	case "Read":
 		file, _ := s.Input["target_file"].(string)
-		return fmt.Sprintf("📖 Read: %s", filepath.Base(file))
+		return fmt.Sprintf("📖 Read: %s", filepath.Base(sanitizeTerminalText(file)))
 	case "Write", "Edit":
 		file, _ := s.Input["file_path"].(string)
-		return fmt.Sprintf("✏️ %s: %s", s.ToolName, filepath.Base(file))
+		return fmt.Sprintf("✏️ %s: %s", toolName, filepath.Base(sanitizeTerminalText(file)))
 	case "Bash":
 		cmd, _ := s.Input["command"].(string)
-		if len(cmd) > 50 {
-			cmd = cmd[:50] + "..."
+		cmd = sanitizeTerminalText(cmd)
+		if runewidth.StringWidth(cmd) > 50 {
+			cmd = runewidth.Truncate(cmd, 50, "...")
 		}
 		return fmt.Sprintf("🔧 Bash: %s", cmd)
 	case "Grep":
 		pattern, _ := s.Input["pattern"].(string)
-		return fmt.Sprintf("🔍 Grep: %s", pattern)
+		return fmt.Sprintf("🔍 Grep: %s", sanitizeTerminalText(pattern))
 	case "Glob":
 		pattern, _ := s.Input["glob_pattern"].(string)
-		return fmt.Sprintf("📁 Glob: %s", pattern)
+		return fmt.Sprintf("📁 Glob: %s", sanitizeTerminalText(pattern))
 	default:
-		return fmt.Sprintf("🔧 %s", s.ToolName)
+		return fmt.Sprintf("🔧 %s", toolName)
 	}
 }
 
@@ -238,10 +247,10 @@ func (p *FilePreview) Render(width int) string {
 	var b strings.Builder
 
 	// Header
-	b.WriteString(filePathStyle.Render("📄 "+p.Path) + "\n")
+	b.WriteString(filePathStyle.Render("📄 "+sanitizeTerminalText(p.Path)) + "\n")
 
 	// Content with line numbers
-	lines := strings.Split(p.Content, "\n")
+	lines := strings.Split(sanitizeTerminalText(p.Content), "\n")
 	lineNumWidth := len(fmt.Sprintf("%d", p.EndLine))
 
 	for i, line := range lines {
@@ -273,7 +282,7 @@ type ImagePreview struct {
 func (p *ImagePreview) Render() string {
 	var b strings.Builder
 
-	b.WriteString(imageStyle.Render("🖼️ Image: "+p.Path) + "\n")
+	b.WriteString(imageStyle.Render("🖼️ Image: "+sanitizeTerminalText(p.Path)) + "\n")
 	b.WriteString(imageStyle.Render(fmt.Sprintf("  %dx%d %s", p.Width, p.Height, p.Format)) + "\n")
 
 	// ASCII art placeholder

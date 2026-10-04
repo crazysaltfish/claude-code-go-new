@@ -3,6 +3,8 @@ package components
 import (
 	"fmt"
 	"strings"
+
+	"github.com/mattn/go-runewidth"
 )
 
 // DiffEntry is one file-changing tool execution shown by the /diff viewer.
@@ -64,12 +66,13 @@ func (m *DiffViewModel) Page(delta int) {
 }
 
 func (m *DiffViewModel) View() string {
-	width := m.Width
-	if width < 24 {
-		width = 24
-	}
+	width := terminalContentWidth(m.Width)
 	var b strings.Builder
-	b.WriteString(chatHeaderStyle.Render("Claude Code · Diff") + "\n")
+	headerWidth := width - chatHeaderStyle.GetHorizontalFrameSize()
+	if headerWidth < 1 {
+		headerWidth = 1
+	}
+	b.WriteString(chatHeaderStyle.Render(runewidth.Truncate("Claude Code · Diff", headerWidth, "")) + "\n")
 	b.WriteString(dividerStyle.Render(strings.Repeat("─", width)) + "\n")
 
 	if len(m.Entries) == 0 {
@@ -83,7 +86,8 @@ func (m *DiffViewModel) View() string {
 		if title == "" {
 			title = entry.Summary
 		}
-		b.WriteString(filePathStyle.Render(fmt.Sprintf("[%d/%d] %s", m.Index+1, len(m.Entries), title)) + "\n")
+		title = fmt.Sprintf("[%d/%d] %s", m.Index+1, len(m.Entries), sanitizeTerminalText(title))
+		b.WriteString(filePathStyle.Render(runewidth.Truncate(title, width, "")) + "\n")
 		lines := m.diffLines()
 		end := m.Offset + m.bodyHeight()
 		if end > len(lines) {
@@ -103,7 +107,7 @@ func (m *DiffViewModel) View() string {
 	if len(m.Entries) > 0 {
 		footer += fmt.Sprintf(" · line %d/%d", m.Offset+1, len(m.diffLines()))
 	}
-	b.WriteString(chatFooterStyle.Render(footer))
+	b.WriteString(chatFooterStyle.Render(wrapText(footer, width)))
 	return chatContainerStyle.Render(b.String())
 }
 
@@ -119,7 +123,7 @@ func (m *DiffViewModel) diffLines() []string {
 	if len(m.Entries) == 0 || m.Index < 0 || m.Index >= len(m.Entries) {
 		return nil
 	}
-	rendered := strings.TrimSuffix(renderDiffOutput(m.Entries[m.Index].Diff, m.Width-6), "\n")
+	rendered := strings.TrimSuffix(renderDiffOutput(m.Entries[m.Index].Diff, terminalContentWidth(m.Width)), "\n")
 	if rendered == "" {
 		return nil
 	}

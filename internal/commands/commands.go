@@ -239,6 +239,24 @@ func (c *ClearCommand) Execute(ctx context.Context, args string, context *Comman
 	}, nil
 }
 
+// DiffCommand documents the interactive diff viewer. The Bubble Tea UI
+// intercepts /diff before command execution and opens the dedicated page.
+type DiffCommand struct{}
+
+func NewDiffCommand() *DiffCommand { return &DiffCommand{} }
+
+func (c *DiffCommand) Name() string        { return "diff" }
+func (c *DiffCommand) Description() string { return "Open the session diff viewer" }
+func (c *DiffCommand) IsEnabled() bool     { return true }
+func (c *DiffCommand) IsHidden() bool      { return false }
+
+func (c *DiffCommand) Execute(context.Context, string, *CommandContext) (*CommandResult, error) {
+	return &CommandResult{
+		Type:  "text",
+		Value: "The /diff viewer is available in interactive mode.",
+	}, nil
+}
+
 // ModelCommand manages model selection.
 type ModelCommand struct {
 	currentModel string

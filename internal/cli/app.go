@@ -485,6 +485,7 @@ func (a *App) printResultMessage(msg query.ResultMessage) {
 // registerCommands registers all built-in commands.
 func (a *App) registerCommands() {
 	a.registry.Register(commands.NewHelpCommand(a.registry))
+	a.registry.Register(commands.NewDiffCommand())
 	a.registry.Register(commands.NewExitCommand())
 	a.registry.Register(commands.NewClearCommand())
 	a.registry.Register(commands.NewModelCommand())

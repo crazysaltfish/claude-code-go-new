@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"claude-code-go/internal/query"
+	"claude-code-go/internal/types"
 	"claude-code-go/internal/ui/components"
 	"claude-code-go/pkg/api"
 )
@@ -216,6 +217,12 @@ func (m *AppModel) waitForPermissionRequest() tea.Cmd {
 }
 
 func (m *AppModel) startQuery(prompt string) tea.Cmd {
+	trimmed := strings.TrimSpace(prompt)
+	if trimmed == "/diff" {
+		m.chat.ClearError()
+		m.chat.OpenDiffView()
+		return nil
+	}
 	m.chat.AddUserMessage(prompt)
 	m.chat.ClearError()
 	m.chat.State = components.ChatStateProcessing
@@ -275,6 +282,11 @@ func (m *AppModel) handleSDKMessage(msg query.SDKMessage) {
 				}
 			}
 			m.chat.FinalizeAssistantMessage(strings.Join(textParts, "\n"))
+			for _, block := range response.Content {
+				if block.Type == "tool_use" {
+					m.chat.AddToolUse(block.Name, block.ID, block.Input)
+				}
+			}
 		}
 
 	case "tool_result":
@@ -283,7 +295,10 @@ func (m *AppModel) handleSDKMessage(msg query.SDKMessage) {
 			toolUseID, _ := data["tool_use_id"].(string)
 			content, _ := data["content"].(string)
 			isError, _ := data["is_error"].(bool)
-			m.chat.AddToolResult(toolName, toolUseID, content, isError)
+			truncated, _ := data["truncated"].(bool)
+			originalChars, _ := data["original_chars"].(int)
+			display, _ := data["display"].(*types.ToolDisplay)
+			m.chat.AddToolResult(toolName, toolUseID, content, isError, truncated, originalChars, display)
 		}
 
 	case "tool_progress":
@@ -334,7 +349,7 @@ func (m *AppModel) handleResultMessage(msg query.ResultMessage) {
 	m.chat.State = components.ChatStateIdle
 	duration := fmt.Sprintf("%.2fs", float64(msg.DurationMs)/1000.0)
 	cost := fmt.Sprintf("$%.6f", msg.TotalCostUsd)
-	m.chat.AddSystemMessage(fmt.Sprintf("Completed in %s | Cost: %s | Turns: %d", duration, cost, msg.NumTurns))
+	m.chat.AddCompletionSummary(duration, cost, msg.NumTurns)
 }
 
 // RunUI runs the interactive UI.

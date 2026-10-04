@@ -81,6 +81,7 @@ type gatedTool struct {
 type observableTool struct {
 	*tools.BaseTool
 	output string
+	err    error
 	limit  int
 }
 
@@ -92,9 +93,11 @@ func (t *observableTool) Call(
 	_ *types.Message,
 	onProgress func(interface{}),
 ) (*types.ToolResult, error) {
-	onProgress(map[string]interface{}{"status": "starting", "percent": 10})
-	onProgress(map[string]interface{}{"status": "running", "percent": 50})
-	return &types.ToolResult{Output: t.output, ToolUseID: toolCtx.ToolUseId}, nil
+	if onProgress != nil {
+		onProgress(map[string]interface{}{"status": "starting", "percent": 10})
+		onProgress(map[string]interface{}{"status": "running", "percent": 50})
+	}
+	return &types.ToolResult{Output: t.output, Error: t.err, ToolUseID: toolCtx.ToolUseId}, nil
 }
 
 func (t *observableTool) MaxResultSizeChars() int { return t.limit }
@@ -571,6 +574,41 @@ func TestExecuteToolEmitsProgressAndLimitsFinalResult(t *testing.T) {
 	}
 	if len([]rune(content)) != 80 || !strings.Contains(content, "truncated") {
 		t.Fatalf("limited result has %d chars and content %q", len([]rune(content)), content)
+	}
+}
+
+func TestExecuteToolPreservesOutputAlongsideError(t *testing.T) {
+	tool := &observableTool{
+		BaseTool: tools.NewBaseTool("Failing", "test failed output"),
+		output:   "diagnostic output",
+		err:      errors.New("exit status 1"),
+		limit:    1024,
+	}
+	engine := NewQueryEngine(QueryEngineConfig{Tools: []types.Tool{tool}})
+	outcome := engine.executeTool(context.Background(), api.ContentBlock{
+		Type: "tool_use", ID: "failed_1", Name: "Failing", Input: json.RawMessage(`{}`),
+	}, nil)
+	data := outcome.sdkMessage.Message.(map[string]interface{})
+	content := data["content"].(string)
+	if data["is_error"] != true || !strings.Contains(content, "diagnostic output") || !strings.Contains(content, "exit status 1") {
+		t.Fatalf("failed tool output lost diagnostics: %#v", data)
+	}
+}
+
+func TestExecuteToolEmitsDisplayMetadataOnlyToSDK(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifact.txt")
+	engine := NewQueryEngine(QueryEngineConfig{Tools: []types.Tool{tools.NewFileWriteTool()}})
+	outcome := engine.executeTool(context.Background(), api.ContentBlock{
+		Type: "tool_use", ID: "write_1", Name: "Write",
+		Input: mustMarshalJSON(map[string]string{"file_path": path, "contents": "hello\n"}),
+	}, nil)
+	data := outcome.sdkMessage.Message.(map[string]interface{})
+	display, ok := data["display"].(*types.ToolDisplay)
+	if !ok || filepath.Base(display.FilePath) != filepath.Base(path) || !strings.Contains(display.Diff, "+hello") {
+		t.Fatalf("SDK display metadata = %#v", data["display"])
+	}
+	if strings.Contains(string(outcome.message.Content), "artifacts") || strings.Contains(string(outcome.message.Content), "diff") {
+		t.Fatalf("model-facing tool result leaked display metadata: %s", outcome.message.Content)
 	}
 }
 

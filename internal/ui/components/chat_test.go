@@ -4,7 +4,22 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
+
+func TestCtrlOCyclesTranscriptModesAndUpdatesHeader(t *testing.T) {
+	model := NewChatModel(80, 24)
+	for _, want := range []TranscriptMode{TranscriptVerbose, TranscriptSummary, TranscriptNormal} {
+		model.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+		if model.Messages.Mode != want {
+			t.Fatalf("Ctrl+O mode = %s, want %s", model.Messages.Mode, want)
+		}
+		if view := model.View(); !strings.Contains(view, "Claude Code · "+want.String()) {
+			t.Fatalf("header does not show %s mode:\n%s", want, view)
+		}
+	}
+}
 
 func TestApprovalViewScrollsThroughCompleteToolCall(t *testing.T) {
 	model := NewChatModel(80, 30)

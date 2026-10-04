@@ -346,6 +346,15 @@ func (t *FileWriteTool) Call(ctx context.Context, args json.RawMessage, toolCtx 
 		}, nil
 	}
 
+	oldContent, readErr := os.ReadFile(input.FilePath)
+	isNewFile := os.IsNotExist(readErr)
+	if readErr != nil && !isNewFile {
+		return &types.ToolResult{
+			Error:     fmt.Errorf("failed to read existing file: %w", readErr),
+			ToolUseID: toolCtx.ToolUseId,
+		}, nil
+	}
+
 	// Create directory if needed
 	dir := filepath.Dir(input.FilePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -367,6 +376,17 @@ func (t *FileWriteTool) Call(ctx context.Context, args json.RawMessage, toolCtx 
 	return &types.ToolResult{
 		Output:    fmt.Sprintf("Successfully wrote to %s", input.FilePath),
 		ToolUseID: toolCtx.ToolUseId,
+		Display: &types.ToolDisplay{
+			Summary: fileChangeSummary(
+				isNewFile,
+				input.FilePath,
+				len(diffContentLines(input.Contents)),
+				len(diffContentLines(string(oldContent))),
+			),
+			FilePath:  input.FilePath,
+			Diff:      buildFileDiff(input.FilePath, string(oldContent), input.Contents, isNewFile),
+			Artifacts: []string{input.FilePath},
+		},
 	}, nil
 }
 
@@ -460,7 +480,58 @@ func (t *FileEditTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 	return &types.ToolResult{
 		Output:    fmt.Sprintf("Successfully edited %s", input.FilePath),
 		ToolUseID: toolCtx.ToolUseId,
+		Display: &types.ToolDisplay{
+			Summary: fmt.Sprintf(
+				"Updated %s (+%d -%d)",
+				input.FilePath,
+				len(diffContentLines(input.NewString)),
+				len(diffContentLines(input.OldString)),
+			),
+			FilePath:  input.FilePath,
+			Diff:      buildReplacementDiff(input.FilePath, input.OldString, input.NewString),
+			Artifacts: []string{input.FilePath},
+		},
 	}, nil
+}
+
+func fileChangeSummary(isNew bool, path string, added, removed int) string {
+	if isNew {
+		return fmt.Sprintf("Created %s (+%d -0)", path, added)
+	}
+	return fmt.Sprintf("Updated %s (+%d -%d)", path, added, removed)
+}
+
+func buildFileDiff(path, oldContent, newContent string, isNew bool) string {
+	oldPath := path
+	if isNew {
+		oldPath = "/dev/null"
+	}
+	lines := []string{"--- " + oldPath, "+++ " + path, "@@ file contents @@"}
+	for _, line := range diffContentLines(oldContent) {
+		lines = append(lines, "-"+line)
+	}
+	for _, line := range diffContentLines(newContent) {
+		lines = append(lines, "+"+line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func buildReplacementDiff(path, oldContent, newContent string) string {
+	lines := []string{"--- " + path, "+++ " + path, "@@ replacement @@"}
+	for _, line := range diffContentLines(oldContent) {
+		lines = append(lines, "-"+line)
+	}
+	for _, line := range diffContentLines(newContent) {
+		lines = append(lines, "+"+line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func diffContentLines(content string) []string {
+	if content == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(content, "\n"), "\n")
 }
 
 // =============================================================================
@@ -931,9 +1002,13 @@ func (t *MultiEditTool) Call(ctx context.Context, args json.RawMessage, toolCtx 
 
 	result := string(content)
 	editCount := 0
+	addedLines := 0
+	removedLines := 0
 
 	// Apply edits sequentially
 	for i, edit := range input.Edits {
+		addedLines += len(diffContentLines(edit.NewString))
+		removedLines += len(diffContentLines(edit.OldString))
 		if edit.NewString == edit.OldString {
 			return &types.ToolResult{
 				Error:     fmt.Errorf("edit %d: old_string and new_string are identical", i+1),
@@ -975,6 +1050,12 @@ func (t *MultiEditTool) Call(ctx context.Context, args json.RawMessage, toolCtx 
 	return &types.ToolResult{
 		Output:    fmt.Sprintf("Successfully applied %d edits to %s", editCount, input.FilePath),
 		ToolUseID: toolCtx.ToolUseId,
+		Display: &types.ToolDisplay{
+			Summary:   fmt.Sprintf("Updated %s (%d edits, +%d -%d)", input.FilePath, editCount, addedLines, removedLines),
+			FilePath:  input.FilePath,
+			Diff:      buildFileDiff(input.FilePath, string(content), result, false),
+			Artifacts: []string{input.FilePath},
+		},
 	}, nil
 }
 

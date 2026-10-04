@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"claude-code-go/internal/types"
 )
 
 // =============================================================================
@@ -68,9 +70,16 @@ type ContentBlock struct {
 	Input json.RawMessage `json:"input,omitempty"`
 
 	// For tool_result blocks
-	ToolUseID string      `json:"tool_use_id,omitempty"`
-	Content   interface{} `json:"content,omitempty"`
-	IsError   bool        `json:"is_error,omitempty"`
+	ToolUseID     string      `json:"tool_use_id,omitempty"`
+	Content       interface{} `json:"content,omitempty"`
+	IsError       bool        `json:"is_error,omitempty"`
+	Status        string      `json:"status,omitempty"`
+	Truncated     bool        `json:"truncated,omitempty"`
+	OriginalChars int         `json:"original_chars,omitempty"`
+	Summary       string      `json:"summary,omitempty"`
+	FilePath      string      `json:"file_path,omitempty"`
+	Diff          string      `json:"diff,omitempty"`
+	Artifacts     []string    `json:"artifacts,omitempty"`
 
 	// For thinking blocks
 	Thinking string `json:"thinking,omitempty"`
@@ -84,8 +93,36 @@ type MessageModel struct {
 	IsStreaming bool           `json:"isStreaming,omitempty"`
 }
 
+// TranscriptMode controls how much conversation detail is rendered.
+type TranscriptMode int
+
+const (
+	TranscriptNormal TranscriptMode = iota
+	TranscriptVerbose
+	TranscriptSummary
+)
+
+func (m TranscriptMode) String() string {
+	switch m {
+	case TranscriptVerbose:
+		return "Verbose"
+	case TranscriptSummary:
+		return "Summary"
+	default:
+		return "Normal"
+	}
+}
+
+func (m TranscriptMode) Next() TranscriptMode {
+	return TranscriptMode((int(m) + 1) % 3)
+}
+
 // RenderMessage renders a message with styling.
 func RenderMessage(msg MessageModel, width int) string {
+	return renderMessageWithMode(msg, width, TranscriptNormal)
+}
+
+func renderMessageWithMode(msg MessageModel, width int, mode TranscriptMode) string {
 	var b strings.Builder
 
 	// Render role prefix
@@ -97,7 +134,9 @@ func RenderMessage(msg MessageModel, width int) string {
 		prefix = assistantStyle.Render("Claude:")
 	case "system":
 		prefix = systemStyle.Render("System:")
-	case "tool_progress", "tool_result":
+	case "summary":
+		prefix = toolResultStyle.Bold(true).Render("Result:")
+	case "tool", "tool_progress", "tool_result":
 		prefix = toolUseStyle.Render("Tool:")
 	default:
 		prefix = msg.Role + ":"
@@ -107,7 +146,7 @@ func RenderMessage(msg MessageModel, width int) string {
 
 	// Render content blocks
 	for i, block := range msg.Content {
-		renderedBlock := renderContentBlock(block, width-4)
+		renderedBlock := renderContentBlock(block, width-4, mode)
 		if msg.IsStreaming && i == len(msg.Content)-1 && block.Type == "text" {
 			renderedBlock += streamCursorStyle.Render("▌")
 		}
@@ -126,7 +165,7 @@ func RenderMessage(msg MessageModel, width int) string {
 }
 
 // renderContentBlock renders a single content block.
-func renderContentBlock(block ContentBlock, width int) string {
+func renderContentBlock(block ContentBlock, width int, mode TranscriptMode) string {
 	switch block.Type {
 	case "text":
 		return wrapText(block.Text, width)
@@ -136,12 +175,187 @@ func renderContentBlock(block ContentBlock, width int) string {
 		return renderToolResult(block, width)
 	case "tool_progress":
 		return renderToolProgress(block, width)
+	case "tool":
+		return renderToolCard(block, width, mode)
 	case "thinking":
 		return renderThinking(block, width)
 	default:
 		return fmt.Sprintf("[%s block]", block.Type)
 	}
 }
+
+func renderToolCard(block ContentBlock, width int, mode TranscriptMode) string {
+	var b strings.Builder
+	icon := "↻"
+	style := toolUseStyle
+	switch block.Status {
+	case "completed":
+		icon, style = "✓", toolResultStyle
+	case "error":
+		icon, style = "✗", errorStyle
+	}
+
+	summary := block.Summary
+	if summary == "" {
+		summary = toolCallSummary(block)
+	}
+	expanded := mode == TranscriptVerbose
+	disclosure := "▸"
+	if expanded {
+		disclosure = "▾"
+	}
+	b.WriteString(style.Render(fmt.Sprintf("%s %s %s", icon, disclosure, summary)))
+	if !expanded {
+		if block.IsError && block.Content != nil {
+			b.WriteString("\n" + errorStyle.Render(compactSummary(fmt.Sprintf("%v", block.Content), 120)))
+		}
+		return b.String()
+	}
+
+	if len(block.Input) > 0 {
+		b.WriteString("\n\n" + systemStyle.Render("Input"))
+		b.WriteString("\n" + renderToolInput(block.Input, width-2))
+	}
+	diff := block.Diff
+	if diff == "" {
+		diff = renderToolDiff(block, width-2)
+	} else {
+		diff = renderDiffOutput(diff, width-2)
+	}
+	if diff != "" {
+		b.WriteString("\n\n" + systemStyle.Render("Changes"))
+		b.WriteString("\n" + diff)
+	}
+	if block.Content != nil {
+		b.WriteString("\n\n" + systemStyle.Render("Output"))
+		b.WriteString("\n" + renderTextOutput(fmt.Sprintf("%v", block.Content), width-2))
+	}
+	if block.Truncated {
+		b.WriteString("\n" + truncationStyle.Render(fmt.Sprintf("Output truncated from %d characters", block.OriginalChars)))
+	}
+	return b.String()
+}
+
+func renderToolInput(input json.RawMessage, width int) string {
+	var value interface{}
+	if err := json.Unmarshal(input, &value); err != nil {
+		return toolOutputStyle.Render(wrapText(string(input), width))
+	}
+	pretty, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return toolOutputStyle.Render(wrapText(string(input), width))
+	}
+	return toolOutputStyle.Render(wrapText(string(pretty), width))
+}
+
+func toolCallSummary(block ContentBlock) string {
+	var input map[string]interface{}
+	_ = json.Unmarshal(block.Input, &input)
+	switch block.Name {
+	case "Read":
+		return "Read " + firstString(input, "target_file", "file_path")
+	case "Write", "Edit", "MultiEdit":
+		path := firstString(input, "file_path", "target_file")
+		added, removed := toolDiffStats(block.Name, input)
+		stats := ""
+		if added > 0 || removed > 0 {
+			stats = fmt.Sprintf(" (+%d -%d)", added, removed)
+		}
+		return strings.TrimSpace(block.Name+" "+path) + stats
+	case "Bash":
+		return "Bash " + compactSummary(firstString(input, "command"), 72)
+	case "Grep":
+		return "Grep " + firstString(input, "pattern")
+	case "Glob":
+		return "Glob " + firstString(input, "glob_pattern", "pattern")
+	default:
+		return block.Name
+	}
+}
+
+func firstString(input map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := input[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func compactSummary(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit-1]) + "…"
+}
+
+func renderToolDiff(block ContentBlock, width int) string {
+	var input map[string]interface{}
+	if err := json.Unmarshal(block.Input, &input); err != nil {
+		return ""
+	}
+	path := firstString(input, "file_path", "target_file")
+	var lines []string
+	switch block.Name {
+	case "Write":
+		lines = append(lines, "--- /dev/null", "+++ "+path, "@@ new file @@")
+		for _, line := range splitContentLines(firstString(input, "contents", "content")) {
+			lines = append(lines, "+"+line)
+		}
+	case "Edit":
+		lines = append(lines, "--- "+path, "+++ "+path, "@@ replacement @@")
+		for _, line := range splitContentLines(firstString(input, "old_string")) {
+			lines = append(lines, "-"+line)
+		}
+		for _, line := range splitContentLines(firstString(input, "new_string")) {
+			lines = append(lines, "+"+line)
+		}
+	case "MultiEdit":
+		lines = append(lines, "--- "+path, "+++ "+path)
+		edits, _ := input["edits"].([]interface{})
+		for index, raw := range edits {
+			edit, _ := raw.(map[string]interface{})
+			lines = append(lines, fmt.Sprintf("@@ edit %d @@", index+1))
+			for _, line := range splitContentLines(firstString(edit, "old_string")) {
+				lines = append(lines, "-"+line)
+			}
+			for _, line := range splitContentLines(firstString(edit, "new_string")) {
+				lines = append(lines, "+"+line)
+			}
+		}
+	default:
+		return ""
+	}
+	return renderDiffOutput(strings.Join(lines, "\n"), width)
+}
+
+func toolDiffStats(name string, input map[string]interface{}) (added, removed int) {
+	switch name {
+	case "Write":
+		return countContentLines(firstString(input, "contents", "content")), 0
+	case "Edit":
+		return countContentLines(firstString(input, "new_string")), countContentLines(firstString(input, "old_string"))
+	case "MultiEdit":
+		edits, _ := input["edits"].([]interface{})
+		for _, raw := range edits {
+			edit, _ := raw.(map[string]interface{})
+			added += countContentLines(firstString(edit, "new_string"))
+			removed += countContentLines(firstString(edit, "old_string"))
+		}
+	}
+	return added, removed
+}
+
+func splitContentLines(content string) []string {
+	if content == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(content, "\n"), "\n")
+}
+
+func countContentLines(content string) int { return len(splitContentLines(content)) }
 
 func renderToolProgress(block ContentBlock, width int) string {
 	label := "Running"
@@ -258,6 +472,7 @@ type MessageListModel struct {
 	MaxVisible   int
 	Width        int
 	Height       int
+	Mode         TranscriptMode
 }
 
 // NewMessageList creates a new message list.
@@ -268,6 +483,7 @@ func NewMessageList(width, height int) *MessageListModel {
 		MaxVisible:   height - 4, // Reserve space for input
 		Width:        width,
 		Height:       height,
+		Mode:         TranscriptNormal,
 	}
 }
 
@@ -278,8 +494,32 @@ func (m *MessageListModel) AddMessage(msg MessageModel) {
 	m.ScrollOffset = 0
 }
 
+// UpsertToolUse creates or refreshes a tool card while keeping expansion state.
+func (m *MessageListModel) UpsertToolUse(toolName, toolUseID string, input json.RawMessage) {
+	if block := m.findToolBlock(toolUseID); block != nil {
+		block.Name = toolName
+		block.Input = append(json.RawMessage(nil), input...)
+		if block.Status == "" {
+			block.Status = "running"
+		}
+		m.ScrollOffset = 0
+		return
+	}
+	m.AddMessage(MessageModel{Role: "tool", Content: []ContentBlock{{
+		Type: "tool", Name: toolName, ToolUseID: toolUseID,
+		Input: append(json.RawMessage(nil), input...), Status: "running",
+	}}})
+}
+
 // UpsertToolProgress keeps only the latest progress payload for each tool call.
 func (m *MessageListModel) UpsertToolProgress(toolName, toolUseID, content string) {
+	if block := m.findToolBlock(toolUseID); block != nil {
+		block.Name = toolName
+		block.Status = "running"
+		block.Content = content
+		m.ScrollOffset = 0
+		return
+	}
 	for i := len(m.Messages) - 1; i >= 0; i-- {
 		message := &m.Messages[i]
 		if message.Role != "tool_progress" || len(message.Content) == 0 ||
@@ -300,6 +540,79 @@ func (m *MessageListModel) UpsertToolProgress(toolName, toolUseID, content strin
 			Content:   content,
 		}},
 	})
+}
+
+// CompleteToolUse updates a tool card in place, preserving the call input for
+// summaries, expandable details, and diff rendering.
+func (m *MessageListModel) CompleteToolUse(toolName, toolUseID, content string, isError, truncated bool, originalChars int, display *types.ToolDisplay) {
+	block := m.findToolBlock(toolUseID)
+	if block == nil {
+		m.UpsertToolUse(toolName, toolUseID, nil)
+		block = m.findToolBlock(toolUseID)
+	}
+	block.Name = toolName
+	block.Content = content
+	block.IsError = isError
+	block.Truncated = truncated
+	block.OriginalChars = originalChars
+	if display != nil {
+		block.Summary = display.Summary
+		block.FilePath = display.FilePath
+		block.Diff = display.Diff
+		block.Artifacts = append([]string(nil), display.Artifacts...)
+	}
+	block.Status = "completed"
+	if isError {
+		block.Status = "error"
+	}
+	m.ScrollOffset = 0
+}
+
+func (m *MessageListModel) findToolBlock(toolUseID string) *ContentBlock {
+	for i := len(m.Messages) - 1; i >= 0; i-- {
+		for j := range m.Messages[i].Content {
+			block := &m.Messages[i].Content[j]
+			if block.Type == "tool" && block.ToolUseID == toolUseID {
+				return block
+			}
+		}
+	}
+	return nil
+}
+
+// CycleTranscriptMode rotates Normal → Verbose → Summary.
+func (m *MessageListModel) CycleTranscriptMode() TranscriptMode {
+	m.Mode = m.Mode.Next()
+	m.ScrollOffset = 0
+	return m.Mode
+}
+
+// ArtifactPaths returns successful file outputs in first-seen order.
+func (m *MessageListModel) ArtifactPaths() []string {
+	seen := make(map[string]bool)
+	var paths []string
+	for _, message := range m.Messages {
+		for _, block := range message.Content {
+			if block.Type != "tool" || block.IsError || block.Status != "completed" {
+				continue
+			}
+			artifacts := block.Artifacts
+			if len(artifacts) == 0 && (block.Name == "Write" || block.Name == "Edit" || block.Name == "MultiEdit") {
+				var input map[string]interface{}
+				_ = json.Unmarshal(block.Input, &input)
+				if path := firstString(input, "file_path", "target_file"); path != "" {
+					artifacts = []string{path}
+				}
+			}
+			for _, path := range artifacts {
+				if path != "" && !seen[path] {
+					seen[path] = true
+					paths = append(paths, path)
+				}
+			}
+		}
+	}
+	return paths
 }
 
 // RemoveToolProgress removes the transient row once a final result arrives.
@@ -459,12 +772,64 @@ func (m *MessageListModel) renderedLines() []string {
 		return nil
 	}
 	var b strings.Builder
-	for _, msg := range m.Messages {
-		b.WriteString(RenderMessage(msg, m.Width))
+	for index, msg := range m.Messages {
+		if !m.messageVisible(index, msg) {
+			continue
+		}
+		b.WriteString(renderMessageWithMode(msg, m.Width, m.Mode))
 		b.WriteString("\n")
 	}
 	rendered := strings.TrimSuffix(b.String(), "\n")
 	return strings.Split(rendered, "\n")
+}
+
+func (m *MessageListModel) messageVisible(index int, message MessageModel) bool {
+	if m.Mode != TranscriptSummary {
+		return true
+	}
+	switch message.Role {
+	case "user", "summary":
+		return true
+	case "tool":
+		for _, block := range message.Content {
+			if block.Type == "tool" && (block.Diff != "" || len(block.Artifacts) > 0) {
+				return true
+			}
+		}
+		return false
+	case "assistant":
+		for next := index + 1; next < len(m.Messages); next++ {
+			switch m.Messages[next].Role {
+			case "user":
+				return true
+			case "assistant":
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// DiffEntries returns file changes in execution order for the /diff viewer.
+func (m *MessageListModel) DiffEntries() []DiffEntry {
+	var entries []DiffEntry
+	for _, message := range m.Messages {
+		for _, block := range message.Content {
+			if block.Type != "tool" || block.Diff == "" {
+				continue
+			}
+			path := block.FilePath
+			if path == "" {
+				var input map[string]interface{}
+				_ = json.Unmarshal(block.Input, &input)
+				path = firstString(input, "file_path", "target_file")
+			}
+			entries = append(entries, DiffEntry{Path: path, Summary: block.Summary, Diff: block.Diff})
+		}
+	}
+	return entries
 }
 
 func (m *MessageListModel) maxScrollOffset() int {

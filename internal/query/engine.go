@@ -1227,6 +1227,7 @@ type toolExecutionOutcome struct {
 	isError       bool
 	truncated     bool
 	originalChars int
+	display       *types.ToolDisplay
 }
 
 // partitionToolCalls mirrors Claude Code's orchestration rule: adjacent calls
@@ -1324,10 +1325,17 @@ func (e *QueryEngine) executeTool(
 
 	content := formatToolOutput(result.Output)
 	if result.Error != nil {
-		content = result.Error.Error()
+		if content == "" || content == "<nil>" {
+			content = result.Error.Error()
+		} else {
+			content += "\n\nError: " + result.Error.Error()
+		}
 	}
 	content, truncated, originalChars := limitToolResult(content, tool.MaxResultSizeChars())
-	return newToolExecutionOutcome(e.sessionID, block.Name, block.ID, content, result.Error != nil, truncated, originalChars)
+	outcome := newToolExecutionOutcome(e.sessionID, block.Name, block.ID, content, result.Error != nil, truncated, originalChars)
+	outcome.display = result.Display
+	outcome.rebuild()
+	return outcome
 }
 
 func (e *QueryEngine) emitToolProgress(
@@ -1661,7 +1669,7 @@ func (o *toolExecutionOutcome) rebuildWithSession(sessionID string) {
 		block["is_error"] = true
 	}
 	o.message = types.Message{Role: "user", Content: mustMarshalJSON([]map[string]interface{}{block})}
-	o.sdkMessage = toolResultSDKMessage(sessionID, o.toolName, o.toolUseID, o.content, o.isError, o.truncated, o.originalChars)
+	o.sdkMessage = toolResultSDKMessage(sessionID, o.toolName, o.toolUseID, o.content, o.isError, o.truncated, o.originalChars, o.display)
 }
 
 func mergeToolResultMessages(messages []types.Message) []types.Message {
@@ -1759,17 +1767,22 @@ func toolResultSDKMessage(
 	sessionID, toolName, toolUseID, content string,
 	isError, truncated bool,
 	originalChars int,
+	display *types.ToolDisplay,
 ) SDKMessage {
+	message := map[string]interface{}{
+		"tool_name":      toolName,
+		"tool_use_id":    toolUseID,
+		"content":        content,
+		"is_error":       isError,
+		"truncated":      truncated,
+		"original_chars": originalChars,
+	}
+	if display != nil {
+		message["display"] = display
+	}
 	return SDKMessage{
-		Type: "tool_result",
-		Message: map[string]interface{}{
-			"tool_name":      toolName,
-			"tool_use_id":    toolUseID,
-			"content":        content,
-			"is_error":       isError,
-			"truncated":      truncated,
-			"original_chars": originalChars,
-		},
+		Type:      "tool_result",
+		Message:   message,
 		SessionID: sessionID,
 		UUID:      generateUUID(),
 		Timestamp: time.Now().UnixMilli(),

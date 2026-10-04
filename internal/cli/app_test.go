@@ -140,10 +140,13 @@ func TestBypassPermissionsCannotOverrideHardBashDenial(t *testing.T) {
 	}
 }
 
-func TestRegisterCommandsIncludesCompact(t *testing.T) {
+func TestRegisterCommandsIncludesInteractiveCommands(t *testing.T) {
 	app := &App{registry: commands.NewRegistry()}
 	app.registerCommands()
 	if _, ok := app.registry.Get("compact"); !ok {
 		t.Fatal("compact command was not registered")
+	}
+	if _, ok := app.registry.Get("diff"); !ok {
+		t.Fatal("diff command was not registered")
 	}
 }

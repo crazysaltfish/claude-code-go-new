@@ -1,11 +1,14 @@
 package components
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"claude-code-go/internal/types"
 )
 
 // =============================================================================
@@ -58,6 +61,7 @@ type ChatModel struct {
 	HelpVisible    bool
 	ApprovalText   string
 	ApprovalOffset int
+	DiffView       *DiffViewModel
 }
 
 // NewChatModel creates a new chat interface.
@@ -82,6 +86,44 @@ func (m *ChatModel) Init() tea.Cmd {
 // Update handles chat interface updates.
 func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	if m.DiffView != nil {
+		switch msg := msg.(type) {
+		case tea.WindowSizeMsg:
+			m.Width, m.Height = msg.Width, msg.Height
+			m.DiffView.Width, m.DiffView.Height = msg.Width, msg.Height
+		case tea.KeyMsg:
+			switch msg.Type {
+			case tea.KeyCtrlC:
+				return m, tea.Quit
+			case tea.KeyEsc:
+				m.CloseDiffView()
+			case tea.KeyLeft:
+				m.DiffView.Previous()
+			case tea.KeyRight:
+				m.DiffView.Next()
+			case tea.KeyUp:
+				m.DiffView.Scroll(-1)
+			case tea.KeyDown:
+				m.DiffView.Scroll(1)
+			case tea.KeyPgUp:
+				m.DiffView.Page(-1)
+			case tea.KeyPgDown:
+				m.DiffView.Page(1)
+			default:
+				if strings.EqualFold(msg.String(), "q") {
+					m.CloseDiffView()
+				}
+			}
+		case tea.MouseMsg:
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				m.DiffView.Scroll(-3)
+			case tea.MouseButtonWheelDown:
+				m.DiffView.Scroll(3)
+			}
+		}
+		return m, nil
+	}
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -98,6 +140,8 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case tea.KeyCtrlH:
 			m.HelpVisible = !m.HelpVisible
+		case tea.KeyCtrlO:
+			m.Messages.CycleTranscriptMode()
 		case tea.KeyPgUp:
 			m.Messages.PageUp()
 		case tea.KeyPgDown:
@@ -144,10 +188,13 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the chat interface.
 func (m *ChatModel) View() string {
+	if m.DiffView != nil {
+		return m.DiffView.View()
+	}
 	var b strings.Builder
 
 	// Header
-	b.WriteString(chatHeaderStyle.Render("Claude Code") + "\n")
+	b.WriteString(chatHeaderStyle.Render("Claude Code · "+m.Messages.Mode.String()) + "\n")
 	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.Width)) + "\n")
 
 	// Messages area
@@ -176,7 +223,7 @@ func (m *ChatModel) View() string {
 	b.WriteString(m.Input.View() + "\n")
 
 	// Footer with help
-	footerText := "Enter: send | PgUp/PgDn: history | Ctrl+C: quit | Ctrl+H: help"
+	footerText := "Enter: send | Ctrl+O: transcript view | /diff: changes | Ctrl+C: quit"
 	if m.ApprovalText != "" {
 		footerText = "↑↓: inspect call | y: allow once | n/Esc: deny | Ctrl+C: quit"
 	} else if m.Messages.IsScrolled() {
@@ -185,11 +232,21 @@ func (m *ChatModel) View() string {
 			m.Messages.ScrollOffset,
 		)
 	} else if m.HelpVisible {
-		footerText = "↑↓: input history | PgUp/PgDn: chat history | mouse wheel: scroll | Ctrl+H: hide help"
+		footerText = "↑↓: input history | Ctrl+O: Normal/Verbose/Summary | /diff: changes | Ctrl+H: hide help"
 	}
 	b.WriteString(chatFooterStyle.Render(footerText))
 
 	return chatContainerStyle.Render(b.String())
+}
+
+// OpenDiffView opens the dedicated session diff browser.
+func (m *ChatModel) OpenDiffView() {
+	m.DiffView = NewDiffView(m.Messages.DiffEntries(), m.Width, m.Height)
+}
+
+// CloseDiffView returns to the conversation transcript.
+func (m *ChatModel) CloseDiffView() {
+	m.DiffView = nil
 }
 
 // AddAssistantMessage adds an assistant message.
@@ -231,24 +288,34 @@ func (m *ChatModel) AddSystemMessage(content string) {
 	})
 }
 
+// AddCompletionSummary presents the run outcome and any produced artifacts.
+func (m *ChatModel) AddCompletionSummary(duration, cost string, turns int) {
+	content := fmt.Sprintf("Completed in %s · Cost %s · %d turns", duration, cost, turns)
+	if artifacts := m.Messages.ArtifactPaths(); len(artifacts) > 0 {
+		content += fmt.Sprintf("\nChanged files (%d):", len(artifacts))
+		for _, path := range artifacts {
+			content += "\n  • " + path
+		}
+	}
+	m.Messages.AddMessage(MessageModel{
+		Role:    "summary",
+		Content: []ContentBlock{{Type: "text", Text: content}},
+	})
+}
+
 // UpdateToolProgress creates or refreshes a transient tool progress row.
 func (m *ChatModel) UpdateToolProgress(toolName, toolUseID, content string) {
 	m.Messages.UpsertToolProgress(toolName, toolUseID, content)
 }
 
-// AddToolResult replaces transient progress with the final tool result.
-func (m *ChatModel) AddToolResult(toolName, toolUseID, content string, isError bool) {
-	m.Messages.RemoveToolProgress(toolUseID)
-	m.Messages.AddMessage(MessageModel{
-		Role: "tool_result",
-		Content: []ContentBlock{{
-			Type:      "tool_result",
-			Name:      toolName,
-			ToolUseID: toolUseID,
-			Content:   content,
-			IsError:   isError,
-		}},
-	})
+// AddToolUse creates a collapsed tool card before execution starts.
+func (m *ChatModel) AddToolUse(toolName, toolUseID string, input json.RawMessage) {
+	m.Messages.UpsertToolUse(toolName, toolUseID, input)
+}
+
+// AddToolResult completes the existing tool card while preserving its input.
+func (m *ChatModel) AddToolResult(toolName, toolUseID, content string, isError, truncated bool, originalChars int, display *types.ToolDisplay) {
+	m.Messages.CompleteToolUse(toolName, toolUseID, content, isError, truncated, originalChars, display)
 }
 
 // SetApproval displays a tool approval panel.

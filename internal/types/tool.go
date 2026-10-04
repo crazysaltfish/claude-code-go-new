@@ -14,9 +14,19 @@ type ToolInputJSONSchema struct {
 
 // ToolResult represents the result of a tool execution.
 type ToolResult struct {
-	Output    interface{} `json:"output"`
-	Error     error       `json:"error,omitempty"`
-	ToolUseID string      `json:"toolUseId"`
+	Output    interface{}  `json:"output"`
+	Error     error        `json:"error,omitempty"`
+	ToolUseID string       `json:"toolUseId"`
+	Display   *ToolDisplay `json:"-"`
+}
+
+// ToolDisplay carries presentation-only metadata. It is emitted to interactive
+// clients but deliberately excluded from the model-facing tool result.
+type ToolDisplay struct {
+	Summary   string   `json:"summary,omitempty"`
+	FilePath  string   `json:"file_path,omitempty"`
+	Diff      string   `json:"diff,omitempty"`
+	Artifacts []string `json:"artifacts,omitempty"`
 }
 
 // ToolContext provides context for tool execution.

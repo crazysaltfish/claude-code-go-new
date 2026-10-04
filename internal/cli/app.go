@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -38,6 +39,8 @@ type App struct {
 	permissionUI       bool
 	printStreamActive  bool
 	memoryDir          string
+	permissionMu       sync.RWMutex
+	permissionPromptMu sync.Mutex
 }
 
 // Config holds CLI configuration.
@@ -122,7 +125,8 @@ func (a *App) Initialize() error {
 	if a.config.PermissionMode != "" && !isExternalPermissionMode(types.PermissionMode(a.config.PermissionMode)) {
 		return fmt.Errorf("invalid permission mode: %s", a.config.PermissionMode)
 	}
-	if permissionFlag := a.config.PermissionMode; permissionFlag != "" && permissionFlag != a.stateManager.GetPermissionMode() {
+	if permissionFlag := a.config.PermissionMode; permissionFlag != "" &&
+		permissionFlag != string(types.PermissionModeSession) && permissionFlag != a.stateManager.GetPermissionMode() {
 		if err := a.stateManager.SetPermissionMode(permissionFlag); err != nil {
 			return fmt.Errorf("failed to persist permission mode: %w", err)
 		}
@@ -193,13 +197,14 @@ func (a *App) Initialize() error {
 		MemoryDirectory: memoryContext.Directory,
 		SessionMemory:   sessionMemory,
 		GetAppState: func() *types.AppState {
+			permissionMode := a.currentPermissionMode()
 			return &types.AppState{
 				MainLoopModel: a.config.Model,
 				Settings: types.SettingsJson{
-					PermissionMode: a.config.PermissionMode,
+					PermissionMode: string(permissionMode),
 				},
 				ToolPermissionContext: types.ToolPermissionContext{
-					Mode: types.PermissionMode(a.config.PermissionMode),
+					Mode: permissionMode,
 				},
 			}
 		},
@@ -264,6 +269,7 @@ func (a *App) runInteractiveMode() error {
 	model := ui.NewAppModelWithContext(a.ctx, a.submitInteractiveInput, 80, 24)
 	model.SetInitialPrompt(a.initialPrompt)
 	model.SetPermissionRequests(a.permissionRequests)
+	model.SetPermissionMode(a.currentPermissionMode(), a.setPermissionMode)
 
 	// Create and run the tea program
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -304,6 +310,9 @@ func (a *App) submitInteractiveInput(ctx context.Context, input string) (<-chan 
 	}
 	if cmdName == "compact" {
 		return a.queryEngine.Compact(ctx, args)
+	}
+	if cmdName == "permissions" || cmdName == "perm" {
+		return a.executePermissionCommand(args), nil
 	}
 
 	output := make(chan interface{}, 1)
@@ -350,10 +359,7 @@ func (a *App) canUseTool(ctx context.Context, toolName string, input json.RawMes
 		return &types.PermissionDecision{Behavior: types.PermissionBehaviorDeny, Message: "unknown tool"}, nil
 	}
 
-	mode := types.PermissionMode(a.config.PermissionMode)
-	if mode == "" {
-		mode = types.PermissionModeDefault
-	}
+	mode := a.currentPermissionMode()
 	riskReason := ""
 	if tool.Name() == "Bash" {
 		var bashInput struct {
@@ -372,7 +378,7 @@ func (a *App) canUseTool(ctx context.Context, toolName string, input json.RawMes
 			}
 		}
 	}
-	if mode == types.PermissionModeBypassPermissions {
+	if mode == types.PermissionModeBypassPermissions || mode == types.PermissionModeSession {
 		return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
 	}
 	pathsWithinCwd := true
@@ -389,17 +395,33 @@ func (a *App) canUseTool(ctx context.Context, toolName string, input json.RawMes
 			}
 		}
 	}
-	if pathsWithinMemory {
+	if mode == types.PermissionModePlan {
+		if tool.IsReadOnly(input) && (pathsWithinCwd || pathsWithinMemory) {
+			return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
+		}
+		return &types.PermissionDecision{
+			Behavior: types.PermissionBehaviorDeny,
+			Message:  fmt.Sprintf("tool %s is not allowed in plan mode", tool.Name()),
+		}, nil
+	}
+	if mode == types.PermissionModeDontAsk {
+		if tool.IsReadOnly(input) && pathsWithinCwd {
+			return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
+		}
+		return &types.PermissionDecision{
+			Behavior: types.PermissionBehaviorDeny,
+			Message:  fmt.Sprintf("tool %s is not pre-approved in dontAsk mode", tool.Name()),
+		}, nil
+	}
+	if pathsWithinMemory && mode == types.PermissionModeAcceptEdits {
 		switch tool.Name() {
 		case "Read":
 			return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
 		case "Write", "Edit":
-			if mode != types.PermissionModePlan && mode != types.PermissionModeDontAsk {
-				return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
-			}
+			return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
 		}
 	}
-	if tool.IsReadOnly(input) && pathsWithinCwd {
+	if mode == types.PermissionModeAcceptEdits && tool.IsReadOnly(input) && pathsWithinCwd {
 		return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
 	}
 	if mode == types.PermissionModeAcceptEdits && pathsWithinCwd {
@@ -408,9 +430,6 @@ func (a *App) canUseTool(ctx context.Context, toolName string, input json.RawMes
 			return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
 		}
 	}
-	if mode == types.PermissionModePlan || mode == types.PermissionModeDontAsk {
-		return &types.PermissionDecision{Behavior: types.PermissionBehaviorDeny, Message: fmt.Sprintf("tool %s is not allowed in %s mode", tool.Name(), mode)}, nil
-	}
 	if !a.permissionUI {
 		return &types.PermissionDecision{
 			Behavior: types.PermissionBehaviorDeny,
@@ -418,7 +437,17 @@ func (a *App) canUseTool(ctx context.Context, toolName string, input json.RawMes
 		}, nil
 	}
 
-	response := make(chan bool, 1)
+	// Serialize prompts so concurrent safe tools cannot overlap approval panels.
+	// Re-check the mode after acquiring the slot because an earlier approval
+	// may have enabled all remaining tools for this session.
+	a.permissionPromptMu.Lock()
+	defer a.permissionPromptMu.Unlock()
+	mode = a.currentPermissionMode()
+	if mode == types.PermissionModeSession || mode == types.PermissionModeBypassPermissions {
+		return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
+	}
+
+	response := make(chan ui.PermissionResponse, 1)
 	request := ui.PermissionRequest{
 		ToolName:    tool.Name(),
 		Input:       append(json.RawMessage(nil), input...),
@@ -433,14 +462,84 @@ func (a *App) canUseTool(ctx context.Context, toolName string, input json.RawMes
 		return nil, ctx.Err()
 	}
 	select {
-	case allowed := <-response:
-		if allowed {
+	case permissionResponse := <-response:
+		switch permissionResponse {
+		case ui.PermissionAllowOnce:
+			return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
+		case ui.PermissionAllowSession:
+			if err := a.setPermissionMode(types.PermissionModeSession); err != nil {
+				return nil, err
+			}
 			return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
 		}
 		return &types.PermissionDecision{Behavior: types.PermissionBehaviorDeny, Message: fmt.Sprintf("user denied tool %s", tool.Name())}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func (a *App) currentPermissionMode() types.PermissionMode {
+	a.permissionMu.RLock()
+	defer a.permissionMu.RUnlock()
+	mode := types.PermissionMode(a.config.PermissionMode)
+	if mode == "" {
+		return types.PermissionModeDefault
+	}
+	return mode
+}
+
+func (a *App) setPermissionMode(mode types.PermissionMode) error {
+	if !isExternalPermissionMode(mode) {
+		return fmt.Errorf("invalid permission mode %q", mode)
+	}
+	a.permissionMu.Lock()
+	a.config.PermissionMode = string(mode)
+	a.permissionMu.Unlock()
+	return nil
+}
+
+func (a *App) executePermissionCommand(args string) <-chan interface{} {
+	output := make(chan interface{}, 1)
+	go func() {
+		defer close(output)
+		requested := strings.TrimSpace(args)
+		if requested == "" {
+			mode := a.currentPermissionMode()
+			output <- permissionModeMessage(mode, permissionModeHelp(mode))
+			return
+		}
+		mode := types.PermissionMode(requested)
+		if strings.EqualFold(requested, "allowAll") || strings.EqualFold(requested, "allow-session") {
+			mode = types.PermissionModeSession
+		}
+		if err := a.setPermissionMode(mode); err != nil {
+			output <- query.SDKMessage{Type: "system", Message: map[string]interface{}{
+				"subtype": "error", "error": err.Error(),
+			}}
+			return
+		}
+		output <- permissionModeMessage(mode, "Permission mode: "+string(mode))
+	}()
+	return output
+}
+
+func permissionModeMessage(mode types.PermissionMode, content string) query.SDKMessage {
+	return query.SDKMessage{Type: "system", Message: map[string]interface{}{
+		"subtype": "permission_mode", "mode": string(mode), "content": content,
+	}}
+}
+
+func permissionModeHelp(current types.PermissionMode) string {
+	return fmt.Sprintf(`Permission modes:
+  default           Ask before every tool execution
+  session           Allow all tools for this session only
+  acceptEdits       Auto-approve reads and in-workspace file edits
+  plan              Allow read-only exploration; deny changes
+  dontAsk           Deny operations that are not pre-approved
+  bypassPermissions Allow all tools without prompts (dangerous)
+
+Current mode: %s
+Use /permissions <mode> or Shift+Tab to switch common modes.`, current)
 }
 
 func isExternalPermissionMode(mode types.PermissionMode) bool {
@@ -493,6 +592,8 @@ func (a *App) registerCommands() {
 	a.registry.Register(commands.NewCostCommand())
 	a.registry.Register(commands.NewThemeCommand())
 	a.registry.Register(commands.NewCompactCommand())
+	a.registry.Register(commands.NewPermissionCommand())
+	a.registry.RegisterAlias("perm", "permissions")
 }
 
 // Shutdown cleans up resources.

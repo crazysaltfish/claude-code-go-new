@@ -30,6 +30,7 @@ go run ./cmd/cli --provider openai
 - 支持理解代码库、读写文件、搜索代码及执行终端命令。
 - `Ctrl+O` 可循环切换 Normal、Verbose、Summary 三档对话视图。
 - 输入 `/diff` 可独立浏览本次会话产生的文件变更。
+- 工具权限支持逐次确认、当前会话全部允许、自动接受编辑、规划、禁止询问和绕过确认模式；使用 `Shift+Tab` 或 `/permissions` 切换。
 - 支持 OpenAI 兼容接口与 Anthropic API。
 - 内置工具权限检查、Bash 安全解析和执行钩子。
 - 支持 MCP、LSP、任务、插件、Vim 模式及对话压缩等能力。

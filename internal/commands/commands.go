@@ -685,10 +685,12 @@ func (c *PermissionCommand) Execute(ctx context.Context, args string, context *C
 		return &CommandResult{
 			Type: "text",
 			Value: `Permission Modes:
-  - default: Ask for permission on each operation
+  - default: Ask before every tool execution
+  - session: Allow all tools for this session only
   - acceptEdits: Auto-accept file edits
+  - dontAsk: Deny tools that are not pre-approved
   - bypassPermissions: Allow all operations (use with caution)
-  - plan: Planning mode
+  - plan: Read-only planning mode
 
 Current mode: default
 

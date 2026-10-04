@@ -10,6 +10,9 @@ const (
 	PermissionModeDefault           PermissionMode = "default"
 	PermissionModeDontAsk           PermissionMode = "dontAsk"
 	PermissionModePlan              PermissionMode = "plan"
+	// PermissionModeSession allows every tool for the lifetime of the current
+	// process only. It is intentionally never persisted as a default.
+	PermissionModeSession PermissionMode = "session"
 
 	// Internal permission modes
 	PermissionModeAuto   PermissionMode = "auto"
@@ -23,6 +26,7 @@ var ExternalPermissionModes = []PermissionMode{
 	PermissionModeDefault,
 	PermissionModeDontAsk,
 	PermissionModePlan,
+	PermissionModeSession,
 }
 
 // PermissionBehavior represents the action to take for a permission.

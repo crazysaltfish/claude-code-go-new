@@ -74,20 +74,22 @@ type ChatModel struct {
 	ApprovalOffset int
 	DiffView       *DiffViewModel
 	runStartIndex  int
+	PermissionMode string
 }
 
 // NewChatModel creates a new chat interface.
 func NewChatModel(width, height int) *ChatModel {
 	contentWidth := terminalContentWidth(width)
 	return &ChatModel{
-		Messages:    NewMessageList(contentWidth, height-6),
-		Input:       NewInput(">", "Type your message...", contentWidth),
-		Status:      NewStatusBar(contentWidth),
-		Spinner:     NewSpinner(),
-		State:       ChatStateIdle,
-		Width:       width,
-		Height:      height,
-		HelpVisible: false,
+		Messages:       NewMessageList(contentWidth, height-6),
+		Input:          NewInput(">", "Type your message...", contentWidth),
+		Status:         NewStatusBar(contentWidth),
+		Spinner:        NewSpinner(),
+		State:          ChatStateIdle,
+		Width:          width,
+		Height:         height,
+		HelpVisible:    false,
+		PermissionMode: "default",
 	}
 }
 
@@ -214,7 +216,8 @@ func (m *ChatModel) View() string {
 	if headerWidth < 1 {
 		headerWidth = 1
 	}
-	header := runewidth.Truncate("Claude Code · "+m.Messages.Mode.String(), headerWidth, "")
+	headerText := "Claude Code · " + m.Messages.Mode.String() + " · " + permissionModeLabel(m.PermissionMode)
+	header := runewidth.Truncate(headerText, headerWidth, "")
 	b.WriteString(chatHeaderStyle.Render(header) + "\n")
 	b.WriteString(dividerStyle.Render(strings.Repeat("─", contentWidth)) + "\n")
 
@@ -246,18 +249,35 @@ func (m *ChatModel) View() string {
 	// Footer with help
 	footerText := "Enter: send | Ctrl+O: transcript view | /diff: changes | Ctrl+C: quit"
 	if m.ApprovalText != "" {
-		footerText = "↑↓: inspect call | y: allow once | n/Esc: deny | Ctrl+C: quit"
+		footerText = "↑↓: inspect | y: allow once | a: allow session | n/Esc: deny"
 	} else if m.Messages.IsScrolled() {
 		footerText = fmt.Sprintf(
 			"History: %d lines above latest | PgUp/PgDn or mouse wheel | Enter: send",
 			m.Messages.ScrollOffset,
 		)
 	} else if m.HelpVisible {
-		footerText = "↑↓: input history | Ctrl+O: Normal/Verbose/Summary | /diff: changes | Ctrl+H: hide help"
+		footerText = "↑↓: history | Shift+Tab: permissions | Ctrl+O: transcript | /diff: changes"
 	}
 	b.WriteString(chatFooterStyle.Render(wrapText(footerText, contentWidth)))
 
 	return chatContainerStyle.Render(b.String())
+}
+
+func permissionModeLabel(mode string) string {
+	switch mode {
+	case "acceptEdits":
+		return "Accept edits"
+	case "plan":
+		return "Plan"
+	case "dontAsk":
+		return "Don't ask"
+	case "bypassPermissions":
+		return "Bypass"
+	case "session":
+		return "Allow session"
+	default:
+		return "Ask"
+	}
 }
 
 // OpenDiffView opens the dedicated session diff browser.
@@ -397,7 +417,7 @@ func (m *ChatModel) approvalView() string {
 			len(lines),
 		)
 	}
-	return visible + "\n\n[y] Allow once    [n/Esc] Deny"
+	return visible + "\n\n[y] Allow once    [a] Allow session    [n/Esc] Deny"
 }
 
 func (m *ChatModel) approvalLines() []string {

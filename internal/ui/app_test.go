@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"claude-code-go/internal/query"
 	"claude-code-go/internal/types"
 	"claude-code-go/pkg/api"
@@ -45,6 +47,44 @@ func TestFormatPermissionRequestShowsCompleteInput(t *testing.T) {
 	}
 	if strings.Contains(got, "truncated") || strings.Contains(got, "...") {
 		t.Fatalf("formatted approval unexpectedly truncates input:\n%s", got)
+	}
+}
+
+func TestPermissionPromptCanAllowSession(t *testing.T) {
+	model := NewAppModelWithSubmit(nil, 80, 24)
+	response := make(chan PermissionResponse, 1)
+	model.pendingPermission = &PermissionRequest{ToolName: "Bash", Response: response}
+	model.chat.SetApproval("Permission required")
+
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if got := <-response; got != PermissionAllowSession {
+		t.Fatalf("permission response = %s", got)
+	}
+	if model.permissionMode != types.PermissionModeSession || model.pendingPermission != nil {
+		t.Fatalf("session approval did not update UI state: mode=%s pending=%#v", model.permissionMode, model.pendingPermission)
+	}
+}
+
+func TestShiftTabCyclesCommonPermissionModes(t *testing.T) {
+	model := NewAppModelWithSubmit(nil, 80, 24)
+	var selected []types.PermissionMode
+	model.SetPermissionMode(types.PermissionModeDefault, func(mode types.PermissionMode) error {
+		selected = append(selected, mode)
+		return nil
+	})
+
+	for _, want := range []types.PermissionMode{
+		types.PermissionModeAcceptEdits,
+		types.PermissionModePlan,
+		types.PermissionModeDefault,
+	} {
+		model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		if model.permissionMode != want || model.chat.PermissionMode != string(want) {
+			t.Fatalf("Shift+Tab mode = %s, want %s", model.permissionMode, want)
+		}
+	}
+	if len(selected) != 3 {
+		t.Fatalf("mode setter called %d times, want 3", len(selected))
 	}
 }
 

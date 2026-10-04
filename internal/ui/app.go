@@ -25,8 +25,17 @@ type PermissionRequest struct {
 	ReadOnly    bool
 	Destructive bool
 	RiskReason  string
-	Response    chan bool
+	Response    chan PermissionResponse
 }
+
+// PermissionResponse is the scope selected in an interactive approval.
+type PermissionResponse string
+
+const (
+	PermissionAllowOnce    PermissionResponse = "allow_once"
+	PermissionAllowSession PermissionResponse = "allow_session"
+	PermissionDeny         PermissionResponse = "deny"
+)
 
 // AppModel integrates prompt dispatch and QueryEngine events with Bubble Tea.
 type AppModel struct {
@@ -38,6 +47,8 @@ type AppModel struct {
 	initialPrompt      string
 	permissionRequests <-chan PermissionRequest
 	pendingPermission  *PermissionRequest
+	permissionMode     types.PermissionMode
+	setPermissionMode  func(types.PermissionMode) error
 }
 
 // NewAppModel creates a UI model backed directly by a QueryEngine.
@@ -54,11 +65,23 @@ func NewAppModelWithSubmit(submit SubmitFunc, width, height int) *AppModel {
 func NewAppModelWithContext(parent context.Context, submit SubmitFunc, width, height int) *AppModel {
 	ctx, cancel := context.WithCancel(parent)
 	return &AppModel{
-		chat:   components.NewChatModel(width, height),
-		ctx:    ctx,
-		cancel: cancel,
-		submit: submit,
+		chat:           components.NewChatModel(width, height),
+		ctx:            ctx,
+		cancel:         cancel,
+		submit:         submit,
+		permissionMode: types.PermissionModeDefault,
 	}
+}
+
+// SetPermissionMode connects the UI indicator and Shift+Tab switcher to the
+// runtime permission policy.
+func (m *AppModel) SetPermissionMode(mode types.PermissionMode, setter func(types.PermissionMode) error) {
+	if mode == "" {
+		mode = types.PermissionModeDefault
+	}
+	m.permissionMode = mode
+	m.setPermissionMode = setter
+	m.chat.PermissionMode = string(mode)
 }
 
 // SetInitialPrompt schedules a prompt after the UI starts.
@@ -100,7 +123,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.pendingPermission != nil {
 			if msg.Type == tea.KeyCtrlC {
-				m.pendingPermission.Response <- false
+				m.pendingPermission.Response <- PermissionDeny
 				m.chat.ClearApproval()
 				m.cancel()
 				return m, tea.Quit
@@ -115,13 +138,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			switch strings.ToLower(msg.String()) {
 			case "y":
-				m.pendingPermission.Response <- true
+				m.pendingPermission.Response <- PermissionAllowOnce
 				m.chat.AddSystemMessage(fmt.Sprintf("Allowed tool: %s", m.pendingPermission.ToolName))
 				m.chat.ClearApproval()
 				m.pendingPermission = nil
 				cmds = append(cmds, m.waitForPermissionRequest())
+			case "a":
+				m.pendingPermission.Response <- PermissionAllowSession
+				m.permissionMode = types.PermissionModeSession
+				m.chat.PermissionMode = string(types.PermissionModeSession)
+				m.chat.AddSystemMessage("All tools allowed for this session")
+				m.chat.ClearApproval()
+				m.pendingPermission = nil
+				cmds = append(cmds, m.waitForPermissionRequest())
 			case "n", "esc":
-				m.pendingPermission.Response <- false
+				m.pendingPermission.Response <- PermissionDeny
 				m.chat.AddSystemMessage(fmt.Sprintf("Denied tool: %s", m.pendingPermission.ToolName))
 				m.chat.ClearApproval()
 				m.pendingPermission = nil
@@ -133,6 +164,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC:
 			m.cancel()
 			return m, tea.Quit
+		case tea.KeyShiftTab:
+			next := nextPermissionMode(m.permissionMode)
+			if m.setPermissionMode != nil {
+				if err := m.setPermissionMode(next); err != nil {
+					m.chat.SetError(fmt.Errorf("change permission mode: %w", err))
+					return m, nil
+				}
+			}
+			m.permissionMode = next
+			m.chat.PermissionMode = string(next)
+			m.chat.AddSystemMessage("Permission mode: " + string(next))
+			return m, nil
 		case tea.KeyEnter:
 			if m.chat.State == components.ChatStateIdle && m.chat.Input.Value != "" {
 				prompt := m.chat.Input.Value
@@ -172,6 +215,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.chat = newChat.(*components.ChatModel)
 	cmds = append(cmds, cmd)
 	return m, tea.Batch(cmds...)
+}
+
+func nextPermissionMode(mode types.PermissionMode) types.PermissionMode {
+	switch mode {
+	case types.PermissionModeDefault:
+		return types.PermissionModeAcceptEdits
+	case types.PermissionModeAcceptEdits:
+		return types.PermissionModePlan
+	default:
+		return types.PermissionModeDefault
+	}
 }
 
 func formatPermissionRequest(request PermissionRequest) string {
@@ -319,6 +373,14 @@ func (m *AppModel) handleSDKMessage(msg query.SDKMessage) {
 					m.chat.SetError(fmt.Errorf("%s", errMsg))
 				}
 			case "message":
+				if content, ok := data["content"].(string); ok {
+					m.chat.AddSystemMessage(content)
+				}
+			case "permission_mode":
+				if mode, ok := data["mode"].(string); ok {
+					m.permissionMode = types.PermissionMode(mode)
+					m.chat.PermissionMode = mode
+				}
 				if content, ok := data["content"].(string); ok {
 					m.chat.AddSystemMessage(content)
 				}

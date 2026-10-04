@@ -16,6 +16,7 @@ import (
 
 	"claude-code-go/internal/constants"
 	"claude-code-go/internal/types"
+	"claude-code-go/internal/utils"
 )
 
 // =============================================================================
@@ -217,6 +218,22 @@ func (t *BashTool) Call(ctx context.Context, args json.RawMessage, toolCtx *type
 }
 
 func (t *BashTool) IsConcurrencySafe(input json.RawMessage) bool { return false }
+
+// IsReadOnly classifies shell commands dynamically so plan and dontAsk modes
+// can permit exploration without permitting shell-side mutations.
+func (t *BashTool) IsReadOnly(input json.RawMessage) bool {
+	var value struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal(input, &value) != nil {
+		return false
+	}
+	return utils.IsCommandReadOnly(value.Command)
+}
+
+func (t *BashTool) IsDestructive(input json.RawMessage) bool {
+	return !t.IsReadOnly(input)
+}
 
 // =============================================================================
 // File Read Tool

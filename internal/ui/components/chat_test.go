@@ -68,7 +68,7 @@ func TestApprovalViewScrollsThroughCompleteToolCall(t *testing.T) {
 	if !strings.Contains(last, "[11-20 of 20 lines]") {
 		t.Fatalf("last approval page does not show its position:\n%s", last)
 	}
-	if !strings.Contains(last, "[y] Allow once") || !strings.Contains(last, "[n/Esc] Deny") {
+	if !strings.Contains(last, "[y] Allow once") || !strings.Contains(last, "[a] Allow session") || !strings.Contains(last, "[n/Esc] Deny") {
 		t.Fatalf("approval controls must remain visible:\n%s", last)
 	}
 }

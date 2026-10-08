@@ -609,6 +609,332 @@ func (t *TaskStopTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 	}, nil
 }
 
+// TaskGetTool gets details of a specific task.
+type TaskGetTool struct {
+	*BaseTool
+	taskCreateTool *TaskCreateTool
+	taskManager    *tasks.Manager
+}
+
+// NewTaskGetTool creates a new task get tool.
+func NewTaskGetTool(taskCreateTool *TaskCreateTool, managers ...*tasks.Manager) *TaskGetTool {
+	var taskManager *tasks.Manager
+	if len(managers) > 0 {
+		taskManager = managers[0]
+	}
+	return &TaskGetTool{
+		BaseTool: &BaseTool{
+			name:        "TaskGet",
+			description: "Get details of a specific task",
+			inputSchema: types.ToolInputJSONSchema{
+				Type: "object",
+				Properties: map[string]map[string]interface{}{
+					"task_id": {
+						"type":        "string",
+						"description": "The ID of the task to get",
+					},
+				},
+				Required: []string{"task_id"},
+			},
+			isEnabled:  true,
+			isReadOnly: true,
+		},
+		taskCreateTool: taskCreateTool,
+		taskManager:    taskManager,
+	}
+}
+
+// Call gets task details.
+func (t *TaskGetTool) Call(ctx context.Context, args json.RawMessage, toolCtx *types.ToolContext, canUseTool types.CanUseToolFunc, parentMessage *types.Message, onProgress func(progress interface{})) (*types.ToolResult, error) {
+	var input struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return nil, fmt.Errorf("failed to parse input: %w", err)
+	}
+	input.TaskID = strings.TrimSpace(input.TaskID)
+	if input.TaskID == "" {
+		return nil, fmt.Errorf("task_id is required")
+	}
+
+	task, ok := t.taskCreateTool.GetTask(input.TaskID)
+	if !ok {
+		if t.taskManager != nil {
+			if executionTask := t.taskManager.GetTask(input.TaskID); executionTask != nil {
+				base := executionTask.GetBase()
+				result := fmt.Sprintf("Task #%s\n  Status: %s\n  Description: %s\n  Created: %s\n", base.ID, base.Status, base.Description, base.StartTime.Format(time.RFC3339))
+				if base.EndTime != nil {
+					result += fmt.Sprintf("  Finished: %s\n", base.EndTime.Format(time.RFC3339))
+				}
+				return &types.ToolResult{Output: result, ToolUseID: toolCtx.ToolUseId}, nil
+			}
+		}
+		return &types.ToolResult{
+			Error:     fmt.Errorf("task not found: %s", input.TaskID),
+			ToolUseID: toolCtx.ToolUseId,
+		}, nil
+	}
+
+	result := fmt.Sprintf("Task #%s\n", task.ID)
+	result += fmt.Sprintf("  Subject: %s\n", task.Subject)
+	result += fmt.Sprintf("  Status: %s\n", task.Status)
+	result += fmt.Sprintf("  Description: %s\n", task.Description)
+	if task.ActiveForm != "" {
+		result += fmt.Sprintf("  Active Form: %s\n", task.ActiveForm)
+	}
+	result += fmt.Sprintf("  Created: %s\n", task.CreatedAt.Format(time.RFC3339))
+	result += fmt.Sprintf("  Updated: %s\n", task.UpdatedAt.Format(time.RFC3339))
+
+	return &types.ToolResult{
+		Output:    result,
+		ToolUseID: toolCtx.ToolUseId,
+	}, nil
+}
+
+// TaskUpdateTool updates a task.
+type TaskUpdateTool struct {
+	*BaseTool
+	taskCreateTool *TaskCreateTool
+}
+
+// NewTaskUpdateTool creates a new task update tool.
+func NewTaskUpdateTool(taskCreateTool *TaskCreateTool) *TaskUpdateTool {
+	return &TaskUpdateTool{
+		BaseTool: &BaseTool{
+			name:        "TaskUpdate",
+			description: "Update a task's status or properties",
+			inputSchema: types.ToolInputJSONSchema{
+				Type: "object",
+				Properties: map[string]map[string]interface{}{
+					"task_id": {
+						"type":        "string",
+						"description": "The ID of the task to update",
+					},
+					"status": {
+						"type":        "string",
+						"enum":        []string{"pending", "in_progress", "completed", "cancelled"},
+						"description": "New status for the task",
+					},
+					"subject": {
+						"type":        "string",
+						"description": "New subject for the task",
+					},
+					"description": {
+						"type":        "string",
+						"description": "New description for the task",
+					},
+				},
+				Required: []string{"task_id"},
+			},
+			isEnabled:  true,
+			isReadOnly: false,
+		},
+		taskCreateTool: taskCreateTool,
+	}
+}
+
+// Call updates a task.
+func (t *TaskUpdateTool) Call(ctx context.Context, args json.RawMessage, toolCtx *types.ToolContext, canUseTool types.CanUseToolFunc, parentMessage *types.Message, onProgress func(progress interface{})) (*types.ToolResult, error) {
+	var input struct {
+		TaskID      string `json:"task_id"`
+		Status      string `json:"status,omitempty"`
+		Subject     string `json:"subject,omitempty"`
+		Description string `json:"description,omitempty"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return nil, fmt.Errorf("failed to parse input: %w", err)
+	}
+
+	if input.Status == "" && input.Subject == "" && input.Description == "" {
+		return nil, fmt.Errorf("at least one field must be provided")
+	}
+	_, err := t.taskCreateTool.updateTask(input.TaskID, func(task *Task) error {
+		if input.Status != "" {
+			task.Status = input.Status
+		}
+		if input.Subject != "" {
+			task.Subject = input.Subject
+		}
+		if input.Description != "" {
+			task.Description = input.Description
+		}
+		return nil
+	})
+	if err != nil {
+		return &types.ToolResult{
+			Error:     err,
+			ToolUseID: toolCtx.ToolUseId,
+		}, nil
+	}
+
+	return &types.ToolResult{
+		Output:    fmt.Sprintf("Task #%s updated successfully", input.TaskID),
+		ToolUseID: toolCtx.ToolUseId,
+	}, nil
+}
+
+// TaskOutputTool retrieves output from running or completed tasks.
+type TaskOutputTool struct {
+	*BaseTool
+	taskManager *tasks.Manager
+}
+
+// SetTaskManager sets the task manager for the tool.
+func (t *TaskOutputTool) SetTaskManager(mgr *tasks.Manager) {
+	t.taskManager = mgr
+}
+
+// NewTaskOutputTool creates a new Task Output tool.
+func NewTaskOutputTool() *TaskOutputTool {
+	return &TaskOutputTool{
+		BaseTool: &BaseTool{
+			name:        "TaskOutput",
+			aliases:     []string{"AgentOutputTool", "BashOutputTool"},
+			description: "[Deprecated] Retrieve output from a background task",
+			inputSchema: types.ToolInputJSONSchema{
+				Type: "object",
+				Properties: map[string]map[string]interface{}{
+					"task_id": {
+						"type":        "string",
+						"description": "The task ID to get output from",
+					},
+					"block": {
+						"type":        "boolean",
+						"default":     true,
+						"description": "Whether to wait for completion",
+					},
+					"timeout": {
+						"type":        "number",
+						"default":     30000,
+						"description": "Max wait time in ms",
+					},
+				},
+				Required: []string{"task_id"},
+			},
+			isEnabled:  true,
+			isReadOnly: true,
+		},
+	}
+}
+
+// Call retrieves task output.
+func (t *TaskOutputTool) Call(ctx context.Context, args json.RawMessage, toolCtx *types.ToolContext, canUseTool types.CanUseToolFunc, parentMessage *types.Message, onProgress func(progress interface{})) (*types.ToolResult, error) {
+	var input struct {
+		TaskID  string `json:"task_id"`
+		Block   bool   `json:"block"`
+		Timeout int    `json:"timeout"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return nil, fmt.Errorf("failed to parse input: %w", err)
+	}
+
+	if input.TaskID == "" {
+		return nil, fmt.Errorf("task ID is required")
+	}
+
+	if input.Timeout == 0 {
+		input.Timeout = 30000
+	}
+
+	if t.taskManager != nil {
+		task := t.taskManager.GetTask(input.TaskID)
+		if task == nil {
+			return nil, fmt.Errorf("task %s not found", input.TaskID)
+		}
+
+		base := task.GetBase()
+		if input.Block && (base.Status == tasks.TaskStatusPending || base.Status == tasks.TaskStatusRunning) {
+			timeout := time.Duration(input.Timeout) * time.Millisecond
+			deadline := time.Now().Add(timeout)
+
+			for time.Now().Before(deadline) {
+				task = t.taskManager.GetTask(input.TaskID)
+				if task == nil {
+					return nil, fmt.Errorf("task %s disappeared", input.TaskID)
+				}
+
+				base = task.GetBase()
+				if base.Status != tasks.TaskStatusPending && base.Status != tasks.TaskStatusRunning {
+					break
+				}
+
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+
+		switch tt := task.(type) {
+		case *tasks.LocalAgentTaskState:
+			if tt.Error != "" {
+				return &types.ToolResult{
+					Output: fmt.Sprintf("Task failed: %s", tt.Error),
+					Error:  fmt.Errorf("task failed: %s", tt.Error),
+				}, nil
+			}
+			if tt.Result != nil {
+				return &types.ToolResult{
+					Output: fmt.Sprintf("%v", tt.Result),
+				}, nil
+			}
+			output, err := tasks.ReadTaskOutput(input.TaskID)
+			if err != nil {
+				return &types.ToolResult{
+					Output: fmt.Sprintf("Task %s completed (no output available)", input.TaskID),
+				}, nil
+			}
+			return &types.ToolResult{Output: output}, nil
+
+		case *tasks.LocalShellTaskState:
+			if tt.Error != "" {
+				return &types.ToolResult{
+					Output: fmt.Sprintf("Shell task failed: %s", tt.Error),
+					Error:  fmt.Errorf("shell task failed: %s", tt.Error),
+				}, nil
+			}
+			output, err := tasks.ReadTaskOutput(input.TaskID)
+			if err != nil {
+				exitCodeStr := ""
+				if tt.ExitCode != nil {
+					exitCodeStr = fmt.Sprintf(" (exit code: %d)", *tt.ExitCode)
+				}
+				return &types.ToolResult{
+					Output: fmt.Sprintf("Shell task completed%s", exitCodeStr),
+				}, nil
+			}
+			return &types.ToolResult{Output: output}, nil
+
+		case *tasks.RemoteAgentTaskState:
+			if tt.Error != "" {
+				return &types.ToolResult{
+					Output: fmt.Sprintf("Remote agent failed: %s", tt.Error),
+					Error:  fmt.Errorf("remote agent failed: %s", tt.Error),
+				}, nil
+			}
+			return &types.ToolResult{
+				Output: fmt.Sprintf("Remote agent task %s completed", input.TaskID),
+			}, nil
+
+		default:
+			return &types.ToolResult{
+				Output: fmt.Sprintf("Task %s status: %s", input.TaskID, base.Status),
+			}, nil
+		}
+	}
+
+	return &types.ToolResult{
+		Output: fmt.Sprintf("Task %s output placeholder", input.TaskID),
+	}, nil
+}
+
+// UserFacingName returns the user-facing name.
+func (t *TaskOutputTool) UserFacingName(input json.RawMessage) string {
+	return "Task Output"
+}
+
+// Description returns the tool description.
+func (t *TaskOutputTool) Description(ctx context.Context, input json.RawMessage, options types.ToolOptions) (string, error) {
+	return "[Deprecated] — prefer Read on the task output file path", nil
+}
+
 // =============================================================================
 // MCP Resource Tools
 // =============================================================================

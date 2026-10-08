@@ -917,47 +917,6 @@ func (t *TodoWriteTool) GetTodos() []TodoItem {
 }
 
 // =============================================================================
-// Task Tool (Agent)
-// =============================================================================
-
-// TaskTool launches sub-agents.
-type TaskTool struct {
-	*BaseTool
-}
-
-// NewTaskTool creates a new task tool.
-func NewTaskTool() *TaskTool {
-	return &TaskTool{
-		BaseTool: &BaseTool{
-			name:        constants.ToolTaskCreate,
-			description: constants.DescTask,
-			inputSchema: convertSchema(constants.GetTaskToolSchema()),
-			isEnabled:   true,
-			isReadOnly:  false,
-		},
-	}
-}
-
-// Call launches a sub-agent task.
-func (t *TaskTool) Call(ctx context.Context, args json.RawMessage, toolCtx *types.ToolContext, canUseTool types.CanUseToolFunc, parentMessage *types.Message, onProgress func(progress interface{})) (*types.ToolResult, error) {
-	var input struct {
-		Description  string `json:"description"`
-		Prompt       string `json:"prompt"`
-		SubagentType string `json:"subagent_type"`
-		Model        int    `json:"model,omitempty"`
-	}
-	if err := json.Unmarshal(args, &input); err != nil {
-		return nil, fmt.Errorf("failed to parse input: %w", err)
-	}
-
-	// For now, return a placeholder - actual agent execution would require more infrastructure
-	return &types.ToolResult{
-		Output:    fmt.Sprintf("Task '%s' queued for execution with %s agent", input.Description, input.SubagentType),
-		ToolUseID: toolCtx.ToolUseId,
-	}, nil
-}
-
-// =============================================================================
 // Multi-Edit Tool
 // =============================================================================
 

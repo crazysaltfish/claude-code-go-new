@@ -1131,13 +1131,15 @@ func NewToolRegistryWithOptions(options RegistryOptions) *Registry {
 	r.Register(NewTaskStopTool(taskCreateTool, r.taskManager))
 	r.Register(NewTaskGetTool(taskCreateTool, r.taskManager))
 	r.Register(NewTaskUpdateTool(taskCreateTool))
+	taskOutputTool := NewTaskOutputTool()
+	taskOutputTool.SetTaskManager(r.taskManager)
+	r.Register(taskOutputTool)
+
+	// Register agent tool
 	agentTool := NewAgentTool()
 	agentTool.SetTaskManager(r.taskManager)
 	r.agentTool = agentTool
 	r.Register(agentTool)
-	taskOutputTool := NewTaskOutputTool()
-	taskOutputTool.SetTaskManager(r.taskManager)
-	r.Register(taskOutputTool)
 
 	// Register advanced editing tools
 	r.Register(NewMultiEditTool())

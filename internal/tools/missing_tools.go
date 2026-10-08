@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"claude-code-go/internal/constants"
@@ -69,11 +70,20 @@ func (t *MCPTool) IsMCP() bool {
 type AgentTool struct {
 	*BaseTool
 	taskManager *tasks.Manager
+	runner      AgentRunner
 }
+
+// AgentRunner executes one isolated sub-agent query.
+type AgentRunner func(context.Context, *tasks.LocalAgentTaskState, *types.ToolContext, func(interface{})) (interface{}, error)
 
 // SetTaskManager sets the task manager for the agent tool.
 func (t *AgentTool) SetTaskManager(mgr *tasks.Manager) {
 	t.taskManager = mgr
+}
+
+// SetRunner configures the query implementation used by spawned agents.
+func (t *AgentTool) SetRunner(runner AgentRunner) {
+	t.runner = runner
 }
 
 // NewAgentTool creates a new Agent tool.
@@ -81,6 +91,7 @@ func NewAgentTool() *AgentTool {
 	return &AgentTool{
 		BaseTool: &BaseTool{
 			name:        constants.ToolAgent,
+			aliases:     []string{"Task"},
 			description: "Spawn a sub-agent to handle complex, multi-step tasks autonomously",
 			inputSchema: types.ToolInputJSONSchema{
 				Type: "object",
@@ -127,6 +138,11 @@ func (t *AgentTool) Call(ctx context.Context, args json.RawMessage, toolCtx *typ
 	if err := json.Unmarshal(args, &input); err != nil {
 		return nil, fmt.Errorf("failed to parse input: %w", err)
 	}
+	input.Description = strings.TrimSpace(input.Description)
+	input.Prompt = strings.TrimSpace(input.Prompt)
+	if input.Description == "" || input.Prompt == "" {
+		return nil, fmt.Errorf("description and prompt are required")
+	}
 
 	// Determine agent type
 	agentType := input.SubagentType
@@ -134,31 +150,62 @@ func (t *AgentTool) Call(ctx context.Context, args json.RawMessage, toolCtx *typ
 		agentType = "general-agent"
 	}
 
-	// If task manager is available, spawn a proper task
-	if t.taskManager != nil {
-		task, err := t.taskManager.SpawnLocalAgent(ctx, input.Prompt, agentType, input.Description, input.RunInBackground)
-		if err != nil {
-			return nil, fmt.Errorf("failed to spawn agent task: %w", err)
-		}
+	if t.taskManager == nil || t.runner == nil {
+		return nil, fmt.Errorf("agent runtime is not configured")
+	}
 
-		// If running in background, return immediately with task ID
-		if input.RunInBackground {
-			return &types.ToolResult{
-				Output: fmt.Sprintf("Agent task '%s' started in background.\nTask ID: %s", input.Description, task.ID),
-			}, nil
-		}
+	task, err := t.taskManager.SpawnLocalAgent(ctx, input.Prompt, agentType, input.Description, input.RunInBackground)
+	if err != nil {
+		return nil, fmt.Errorf("failed to spawn agent task: %w", err)
+	}
+	if err := t.taskManager.SetAgentModel(task.ID, input.Model); err != nil {
+		return nil, err
+	}
+	task.Model = input.Model
+	executionCtx := ctx
+	if input.RunInBackground {
+		executionCtx = context.WithoutCancel(ctx)
+	}
+	if err := t.taskManager.StartExecution(executionCtx, task.ID, func(runCtx context.Context, state *tasks.LocalAgentTaskState) (interface{}, error) {
+		return t.runner(runCtx, state, toolCtx, onProgress)
+	}); err != nil {
+		return nil, fmt.Errorf("failed to start agent task: %w", err)
+	}
 
-		// For foreground tasks, we need to execute synchronously
-		// The actual execution will be handled by the query engine
+	toolUseID := ""
+	if toolCtx != nil {
+		toolUseID = toolCtx.ToolUseId
+	}
+	if input.RunInBackground {
 		return &types.ToolResult{
-			Output: fmt.Sprintf("Agent task '%s' created.\nTask ID: %s\nPrompt: %s", input.Description, task.ID, input.Prompt),
+			Output:    fmt.Sprintf("Agent task '%s' started in background.\nTask ID: %s", input.Description, task.ID),
+			ToolUseID: toolUseID,
 		}, nil
 	}
 
-	// Fallback: placeholder response
-	return &types.ToolResult{
-		Output: fmt.Sprintf("Agent task '%s' spawned successfully. Prompt: %s", input.Description, input.Prompt),
-	}, nil
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		current := t.taskManager.GetTask(task.ID)
+		if current == nil {
+			return nil, fmt.Errorf("agent task %s disappeared", task.ID)
+		}
+		state := current.(*tasks.LocalAgentTaskState)
+		switch state.Status {
+		case tasks.TaskStatusCompleted:
+			return &types.ToolResult{Output: state.Result, ToolUseID: toolUseID}, nil
+		case tasks.TaskStatusFailed:
+			return &types.ToolResult{Output: state.Error, Error: fmt.Errorf("agent task failed: %s", state.Error), ToolUseID: toolUseID}, nil
+		case tasks.TaskStatusKilled:
+			return &types.ToolResult{Output: "Agent task was stopped", Error: context.Canceled, ToolUseID: toolUseID}, nil
+		}
+		select {
+		case <-ctx.Done():
+			_ = t.taskManager.KillTask(task.ID)
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // CheckPermissions checks agent permissions.

@@ -20,7 +20,7 @@ const (
 	ToolWebSearch = "WebSearch"
 
 	// Task tools
-	ToolTaskCreate = "Task"
+	ToolTaskCreate = "TaskCreate"
 	ToolTaskOutput = "TaskOutput"
 	ToolTaskStop   = "TaskStop"
 	ToolTaskGet    = "TaskGet"

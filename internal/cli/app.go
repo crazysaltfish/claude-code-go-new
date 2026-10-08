@@ -13,9 +13,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"claude-code-go/internal/commands"
+	"claude-code-go/internal/constants"
 	"claude-code-go/internal/memory"
 	"claude-code-go/internal/query"
 	"claude-code-go/internal/state"
+	"claude-code-go/internal/tasks"
 	"claude-code-go/internal/tools"
 	"claude-code-go/internal/types"
 	"claude-code-go/internal/ui"
@@ -171,6 +173,55 @@ func (a *App) Initialize() error {
 			BaseURL:   baseURL,
 		})
 	}
+
+	a.toolRegistry.ConfigureAgentRunner(func(ctx context.Context, task *tasks.LocalAgentTaskState, toolCtx *types.ToolContext, onProgress func(interface{})) (interface{}, error) {
+		model := a.config.Model
+		switch task.Model {
+		case "opus":
+			model = constants.ClaudeOpus4_6ModelID
+		case "sonnet":
+			model = constants.ClaudeSonnet4_6ModelID
+		case "haiku":
+			model = constants.ClaudeHaiku4_5ModelID
+		case "":
+		default:
+			model = task.Model
+		}
+		cwd := a.config.Cwd
+		if toolCtx != nil && toolCtx.Cwd != "" {
+			cwd = toolCtx.Cwd
+		}
+		engine := query.NewQueryEngine(query.QueryEngineConfig{
+			Cwd:                cwd,
+			Tools:              a.toolRegistry.FilterToolsForAgent(task.AgentType),
+			CanUseTool:         a.canUseTool,
+			APIClient:          a.apiClient,
+			UserSpecifiedModel: model,
+			MaxTokens:          a.config.MaxTokens,
+			MaxTurns:           a.config.MaxTurns,
+			AppendSystemPrompt: constants.DefaultAgentPrompt,
+		})
+		stream, err := engine.SubmitMessage(ctx, task.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		var final string
+		for message := range stream {
+			if onProgress != nil {
+				onProgress(message)
+			}
+			if result, ok := message.(query.ResultMessage); ok {
+				if result.IsError {
+					return nil, fmt.Errorf("sub-agent failed: %s", result.Result)
+				}
+				final = result.Result
+			}
+		}
+		if final == "" {
+			return nil, fmt.Errorf("sub-agent completed without a result")
+		}
+		return final, nil
+	})
 
 	// Initialize query engine
 	memoryContext, err := memory.Load(cwd)

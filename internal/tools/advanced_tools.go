@@ -8,10 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"claude-code-go/internal/constants"
+	"claude-code-go/internal/tasks"
 	"claude-code-go/internal/types"
 )
 
@@ -295,6 +298,7 @@ func (t *LSPTool) IsConcurrencySafe(input json.RawMessage) bool {
 // TaskCreateTool creates new tasks.
 type TaskCreateTool struct {
 	*BaseTool
+	mu    sync.RWMutex
 	tasks map[string]*Task
 }
 
@@ -357,6 +361,11 @@ func (t *TaskCreateTool) Call(ctx context.Context, args json.RawMessage, toolCtx
 	if err := json.Unmarshal(args, &input); err != nil {
 		return nil, fmt.Errorf("failed to parse input: %w", err)
 	}
+	input.Subject = strings.TrimSpace(input.Subject)
+	input.Description = strings.TrimSpace(input.Description)
+	if input.Subject == "" || input.Description == "" {
+		return nil, fmt.Errorf("subject and description are required")
+	}
 
 	// Generate task ID
 	taskID := generateTaskID()
@@ -372,7 +381,9 @@ func (t *TaskCreateTool) Call(ctx context.Context, args json.RawMessage, toolCtx
 		UpdatedAt:   time.Now(),
 	}
 
+	t.mu.Lock()
 	t.tasks[taskID] = task
+	t.mu.Unlock()
 
 	return &types.ToolResult{
 		Output:    fmt.Sprintf("Task #%s created successfully: %s", taskID, input.Subject),
@@ -382,18 +393,69 @@ func (t *TaskCreateTool) Call(ctx context.Context, args json.RawMessage, toolCtx
 
 // GetTask retrieves a task by ID.
 func (t *TaskCreateTool) GetTask(id string) (*Task, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	task, ok := t.tasks[id]
-	return task, ok
+	return cloneManagedTask(task), ok
+}
+
+func (t *TaskCreateTool) updateTask(id string, update func(*Task) error) (*Task, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	task, ok := t.tasks[id]
+	if !ok {
+		return nil, fmt.Errorf("task not found: %s", id)
+	}
+	if err := update(task); err != nil {
+		return nil, err
+	}
+	task.UpdatedAt = time.Now()
+	return cloneManagedTask(task), nil
+}
+
+func (t *TaskCreateTool) listTasks() []*Task {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	result := make([]*Task, 0, len(t.tasks))
+	for _, task := range t.tasks {
+		result = append(result, cloneManagedTask(task))
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
+	})
+	return result
+}
+
+func cloneManagedTask(task *Task) *Task {
+	if task == nil {
+		return nil
+	}
+	copy := *task
+	if task.Metadata != nil {
+		copy.Metadata = make(map[string]interface{}, len(task.Metadata))
+		for key, value := range task.Metadata {
+			copy.Metadata[key] = value
+		}
+	}
+	return &copy
 }
 
 // TaskListTool lists all tasks.
 type TaskListTool struct {
 	*BaseTool
 	taskCreateTool *TaskCreateTool
+	taskManager    *tasks.Manager
 }
 
 // NewTaskListTool creates a new task list tool.
-func NewTaskListTool(taskCreateTool *TaskCreateTool) *TaskListTool {
+func NewTaskListTool(taskCreateTool *TaskCreateTool, managers ...*tasks.Manager) *TaskListTool {
+	var taskManager *tasks.Manager
+	if len(managers) > 0 {
+		taskManager = managers[0]
+	}
 	return &TaskListTool{
 		BaseTool: &BaseTool{
 			name:        constants.ToolTaskList,
@@ -403,7 +465,7 @@ func NewTaskListTool(taskCreateTool *TaskCreateTool) *TaskListTool {
 				Properties: map[string]map[string]interface{}{
 					"status": {
 						"type":        "string",
-						"enum":        []string{"pending", "in_progress", "completed", "cancelled"},
+						"enum":        []string{"pending", "in_progress", "running", "completed", "failed", "cancelled", "killed"},
 						"description": "Filter by status",
 					},
 				},
@@ -412,6 +474,7 @@ func NewTaskListTool(taskCreateTool *TaskCreateTool) *TaskListTool {
 			isReadOnly: true,
 		},
 		taskCreateTool: taskCreateTool,
+		taskManager:    taskManager,
 	}
 }
 
@@ -427,7 +490,7 @@ func (t *TaskListTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 	var result strings.Builder
 	result.WriteString("Tasks:\n")
 
-	for _, task := range t.taskCreateTool.tasks {
+	for _, task := range t.taskCreateTool.listTasks() {
 		if input.Status != "" && task.Status != input.Status {
 			continue
 		}
@@ -444,6 +507,27 @@ func (t *TaskListTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 
 		result.WriteString(fmt.Sprintf("  %s [#%s] %s\n", statusIcon, task.ID, task.Subject))
 	}
+	if t.taskManager != nil {
+		executionTasks := t.taskManager.GetAllTasks()
+		ids := make([]string, 0, len(executionTasks))
+		for id := range executionTasks {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			task := executionTasks[id].GetBase()
+			if input.Status != "" && string(task.Status) != input.Status {
+				continue
+			}
+			statusIcon := "◐"
+			if task.Status == tasks.TaskStatusCompleted {
+				statusIcon = "●"
+			} else if task.Status == tasks.TaskStatusFailed || task.Status == tasks.TaskStatusKilled {
+				statusIcon = "✗"
+			}
+			result.WriteString(fmt.Sprintf("  %s [#%s] %s (%s)\n", statusIcon, task.ID, task.Description, task.Status))
+		}
+	}
 
 	return &types.ToolResult{
 		Output:    result.String(),
@@ -455,10 +539,15 @@ func (t *TaskListTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 type TaskStopTool struct {
 	*BaseTool
 	taskCreateTool *TaskCreateTool
+	taskManager    *tasks.Manager
 }
 
 // NewTaskStopTool creates a new task stop tool.
-func NewTaskStopTool(taskCreateTool *TaskCreateTool) *TaskStopTool {
+func NewTaskStopTool(taskCreateTool *TaskCreateTool, managers ...*tasks.Manager) *TaskStopTool {
+	var taskManager *tasks.Manager
+	if len(managers) > 0 {
+		taskManager = managers[0]
+	}
 	return &TaskStopTool{
 		BaseTool: &BaseTool{
 			name:        constants.ToolTaskStop,
@@ -477,6 +566,7 @@ func NewTaskStopTool(taskCreateTool *TaskCreateTool) *TaskStopTool {
 			isReadOnly: false,
 		},
 		taskCreateTool: taskCreateTool,
+		taskManager:    taskManager,
 	}
 }
 
@@ -489,19 +579,32 @@ func (t *TaskStopTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 		return nil, fmt.Errorf("failed to parse input: %w", err)
 	}
 
-	task, ok := t.taskCreateTool.GetTask(input.TaskID)
-	if !ok {
+	input.TaskID = strings.TrimSpace(input.TaskID)
+	if input.TaskID == "" {
+		return nil, fmt.Errorf("task_id is required")
+	}
+	task, err := t.taskCreateTool.updateTask(input.TaskID, func(task *Task) error {
+		if task.Status == "completed" || task.Status == "cancelled" {
+			return fmt.Errorf("task %s is already %s", task.ID, task.Status)
+		}
+		task.Status = "cancelled"
+		return nil
+	})
+	if err != nil {
+		if t.taskManager != nil && t.taskManager.GetTask(input.TaskID) != nil {
+			if killErr := t.taskManager.KillTask(input.TaskID); killErr != nil {
+				return &types.ToolResult{Error: killErr, ToolUseID: toolCtx.ToolUseId}, nil
+			}
+			return &types.ToolResult{Output: fmt.Sprintf("Task #%s stopped", input.TaskID), ToolUseID: toolCtx.ToolUseId}, nil
+		}
 		return &types.ToolResult{
-			Error:     fmt.Errorf("task not found: %s", input.TaskID),
+			Error:     err,
 			ToolUseID: toolCtx.ToolUseId,
 		}, nil
 	}
 
-	task.Status = "cancelled"
-	task.UpdatedAt = time.Now()
-
 	return &types.ToolResult{
-		Output:    fmt.Sprintf("Task #%s stopped", input.TaskID),
+		Output:    fmt.Sprintf("Task #%s stopped", task.ID),
 		ToolUseID: toolCtx.ToolUseId,
 	}, nil
 }
@@ -745,8 +848,11 @@ func (t *ConfigTool) Call(ctx context.Context, args json.RawMessage, toolCtx *ty
 // =============================================================================
 
 var taskCounter int
+var taskCounterMu sync.Mutex
 
 func generateTaskID() string {
+	taskCounterMu.Lock()
+	defer taskCounterMu.Unlock()
 	taskCounter++
 	return fmt.Sprintf("%d", taskCounter)
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"claude-code-go/internal/constants"
+	"claude-code-go/internal/tasks"
 	"claude-code-go/internal/types"
 	"claude-code-go/internal/utils"
 )
@@ -1087,6 +1088,8 @@ type Registry struct {
 	options        RegistryOptions
 	todoTool       *TodoWriteTool
 	taskCreateTool *TaskCreateTool
+	taskManager    *tasks.Manager
+	agentTool      *AgentTool
 }
 
 // RegistryOptions controls which registered tools are exposed to the model.
@@ -1142,6 +1145,7 @@ func NewToolRegistryWithOptions(options RegistryOptions) *Registry {
 		order:   make([]string, 0),
 		options: options,
 	}
+	r.taskManager = tasks.NewManager(types.NewAppStateStore())
 
 	// Register core file tools
 	r.Register(NewBashTool())
@@ -1164,11 +1168,17 @@ func NewToolRegistryWithOptions(options RegistryOptions) *Registry {
 	taskCreateTool := NewTaskCreateTool()
 	r.taskCreateTool = taskCreateTool
 	r.Register(taskCreateTool)
-	r.Register(NewTaskListTool(taskCreateTool))
-	r.Register(NewTaskStopTool(taskCreateTool))
-	r.Register(NewTaskGetTool(taskCreateTool))
+	r.Register(NewTaskListTool(taskCreateTool, r.taskManager))
+	r.Register(NewTaskStopTool(taskCreateTool, r.taskManager))
+	r.Register(NewTaskGetTool(taskCreateTool, r.taskManager))
 	r.Register(NewTaskUpdateTool(taskCreateTool))
-	r.Register(NewTaskTool())
+	agentTool := NewAgentTool()
+	agentTool.SetTaskManager(r.taskManager)
+	r.agentTool = agentTool
+	r.Register(agentTool)
+	taskOutputTool := NewTaskOutputTool()
+	taskOutputTool.SetTaskManager(r.taskManager)
+	r.Register(taskOutputTool)
 
 	// Register advanced editing tools
 	r.Register(NewMultiEditTool())
@@ -1266,6 +1276,18 @@ func (r *Registry) toolEnabled(tool types.Tool) (bool, string) {
 // GetTodoTool returns the todo tool instance
 func (r *Registry) GetTodoTool() *TodoWriteTool {
 	return r.todoTool
+}
+
+// ConfigureAgentRunner connects the Agent tool to the query runtime.
+func (r *Registry) ConfigureAgentRunner(runner AgentRunner) {
+	if r.agentTool != nil {
+		r.agentTool.SetRunner(runner)
+	}
+}
+
+// TaskManager returns the shared execution task manager.
+func (r *Registry) TaskManager() *tasks.Manager {
+	return r.taskManager
 }
 
 // FilterToolsForAgent filters tools available to a sub-agent

@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"claude-code-go/internal/constants"
+	"claude-code-go/internal/tasks"
 	"claude-code-go/internal/types"
 )
 
@@ -920,10 +921,15 @@ func (t *PowerShellTool) Call(ctx context.Context, args json.RawMessage, toolCtx
 type TaskGetTool struct {
 	*BaseTool
 	taskCreateTool *TaskCreateTool
+	taskManager    *tasks.Manager
 }
 
 // NewTaskGetTool creates a new task get tool.
-func NewTaskGetTool(taskCreateTool *TaskCreateTool) *TaskGetTool {
+func NewTaskGetTool(taskCreateTool *TaskCreateTool, managers ...*tasks.Manager) *TaskGetTool {
+	var taskManager *tasks.Manager
+	if len(managers) > 0 {
+		taskManager = managers[0]
+	}
 	return &TaskGetTool{
 		BaseTool: &BaseTool{
 			name:        "TaskGet",
@@ -942,6 +948,7 @@ func NewTaskGetTool(taskCreateTool *TaskCreateTool) *TaskGetTool {
 			isReadOnly: true,
 		},
 		taskCreateTool: taskCreateTool,
+		taskManager:    taskManager,
 	}
 }
 
@@ -953,9 +960,23 @@ func (t *TaskGetTool) Call(ctx context.Context, args json.RawMessage, toolCtx *t
 	if err := json.Unmarshal(args, &input); err != nil {
 		return nil, fmt.Errorf("failed to parse input: %w", err)
 	}
+	input.TaskID = strings.TrimSpace(input.TaskID)
+	if input.TaskID == "" {
+		return nil, fmt.Errorf("task_id is required")
+	}
 
 	task, ok := t.taskCreateTool.GetTask(input.TaskID)
 	if !ok {
+		if t.taskManager != nil {
+			if executionTask := t.taskManager.GetTask(input.TaskID); executionTask != nil {
+				base := executionTask.GetBase()
+				result := fmt.Sprintf("Task #%s\n  Status: %s\n  Description: %s\n  Created: %s\n", base.ID, base.Status, base.Description, base.StartTime.Format(time.RFC3339))
+				if base.EndTime != nil {
+					result += fmt.Sprintf("  Finished: %s\n", base.EndTime.Format(time.RFC3339))
+				}
+				return &types.ToolResult{Output: result, ToolUseID: toolCtx.ToolUseId}, nil
+			}
+		}
 		return &types.ToolResult{
 			Error:     fmt.Errorf("task not found: %s", input.TaskID),
 			ToolUseID: toolCtx.ToolUseId,
@@ -1036,24 +1057,27 @@ func (t *TaskUpdateTool) Call(ctx context.Context, args json.RawMessage, toolCtx
 		return nil, fmt.Errorf("failed to parse input: %w", err)
 	}
 
-	task, ok := t.taskCreateTool.GetTask(input.TaskID)
-	if !ok {
+	if input.Status == "" && input.Subject == "" && input.Description == "" {
+		return nil, fmt.Errorf("at least one field must be provided")
+	}
+	_, err := t.taskCreateTool.updateTask(input.TaskID, func(task *Task) error {
+		if input.Status != "" {
+			task.Status = input.Status
+		}
+		if input.Subject != "" {
+			task.Subject = input.Subject
+		}
+		if input.Description != "" {
+			task.Description = input.Description
+		}
+		return nil
+	})
+	if err != nil {
 		return &types.ToolResult{
-			Error:     fmt.Errorf("task not found: %s", input.TaskID),
+			Error:     err,
 			ToolUseID: toolCtx.ToolUseId,
 		}, nil
 	}
-
-	if input.Status != "" {
-		task.Status = input.Status
-	}
-	if input.Subject != "" {
-		task.Subject = input.Subject
-	}
-	if input.Description != "" {
-		task.Description = input.Description
-	}
-	task.UpdatedAt = time.Now()
 
 	return &types.ToolResult{
 		Output:    fmt.Sprintf("Task #%s updated successfully", input.TaskID),

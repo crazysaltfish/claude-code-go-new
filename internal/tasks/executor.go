@@ -31,13 +31,29 @@ func NewExecutor(registry *Registry) *Executor {
 
 // ExecuteLocalAgent starts a local agent task.
 func (e *Executor) ExecuteLocalAgent(ctx context.Context, task *LocalAgentTaskState, handler AgentHandler) error {
+	if task == nil {
+		return fmt.Errorf("task is required")
+	}
 	e.mu.Lock()
+	if _, exists := e.cancelFuncs[task.ID]; exists {
+		e.mu.Unlock()
+		return fmt.Errorf("task %s is already running", task.ID)
+	}
 	execCtx, cancel := context.WithCancel(ctx)
 	e.cancelFuncs[task.ID] = cancel
 	e.mu.Unlock()
 
+	if err := e.registry.Update(task.ID, func(state TaskState) TaskState {
+		state.GetBase().Status = TaskStatusRunning
+		return state
+	}); err != nil {
+		cancel()
+		e.mu.Lock()
+		delete(e.cancelFuncs, task.ID)
+		e.mu.Unlock()
+		return err
+	}
 	task.Status = TaskStatusRunning
-	e.registry.Register(task)
 
 	go func() {
 		defer func() {
@@ -46,17 +62,23 @@ func (e *Executor) ExecuteLocalAgent(ctx context.Context, task *LocalAgentTaskSt
 			e.mu.Unlock()
 		}()
 
-		result, err := handler(execCtx, task)
-		if err != nil {
-			task.Error = err.Error()
-			task.Status = TaskStatusFailed
-		} else {
-			task.Result = result
-			task.Status = TaskStatusCompleted
-		}
-		now := time.Now()
-		task.EndTime = &now
-		e.registry.Register(task)
+		result, runErr := handler(execCtx, task)
+		_ = e.registry.Update(task.ID, func(state TaskState) TaskState {
+			current := state.(*LocalAgentTaskState)
+			if current.Status == TaskStatusKilled {
+				return current
+			}
+			if runErr != nil {
+				current.Error = runErr.Error()
+				current.Status = TaskStatusFailed
+			} else {
+				current.Result = result
+				current.Status = TaskStatusCompleted
+			}
+			now := time.Now()
+			current.EndTime = &now
+			return current
+		})
 	}()
 
 	return nil
@@ -64,13 +86,29 @@ func (e *Executor) ExecuteLocalAgent(ctx context.Context, task *LocalAgentTaskSt
 
 // ExecuteLocalShell starts a local shell task.
 func (e *Executor) ExecuteLocalShell(ctx context.Context, task *LocalShellTaskState, handler ShellHandler) error {
+	if task == nil {
+		return fmt.Errorf("task is required")
+	}
 	e.mu.Lock()
+	if _, exists := e.cancelFuncs[task.ID]; exists {
+		e.mu.Unlock()
+		return fmt.Errorf("task %s is already running", task.ID)
+	}
 	execCtx, cancel := context.WithCancel(ctx)
 	e.cancelFuncs[task.ID] = cancel
 	e.mu.Unlock()
 
+	if err := e.registry.Update(task.ID, func(state TaskState) TaskState {
+		state.GetBase().Status = TaskStatusRunning
+		return state
+	}); err != nil {
+		cancel()
+		e.mu.Lock()
+		delete(e.cancelFuncs, task.ID)
+		e.mu.Unlock()
+		return err
+	}
 	task.Status = TaskStatusRunning
-	e.registry.Register(task)
 
 	go func() {
 		defer func() {
@@ -79,17 +117,23 @@ func (e *Executor) ExecuteLocalShell(ctx context.Context, task *LocalShellTaskSt
 			e.mu.Unlock()
 		}()
 
-		exitCode, err := handler(execCtx, task)
-		if err != nil {
-			task.Error = err.Error()
-			task.Status = TaskStatusFailed
-		} else {
-			task.ExitCode = exitCode
-			task.Status = TaskStatusCompleted
-		}
-		now := time.Now()
-		task.EndTime = &now
-		e.registry.Register(task)
+		exitCode, runErr := handler(execCtx, task)
+		_ = e.registry.Update(task.ID, func(state TaskState) TaskState {
+			current := state.(*LocalShellTaskState)
+			if current.Status == TaskStatusKilled {
+				return current
+			}
+			if runErr != nil {
+				current.Error = runErr.Error()
+				current.Status = TaskStatusFailed
+			} else {
+				current.ExitCode = exitCode
+				current.Status = TaskStatusCompleted
+			}
+			now := time.Now()
+			current.EndTime = &now
+			return current
+		})
 	}()
 
 	return nil
@@ -97,14 +141,32 @@ func (e *Executor) ExecuteLocalShell(ctx context.Context, task *LocalShellTaskSt
 
 // ExecuteRemoteAgent starts a remote agent task.
 func (e *Executor) ExecuteRemoteAgent(ctx context.Context, task *RemoteAgentTaskState, handler RemoteAgentHandler) error {
+	if task == nil {
+		return fmt.Errorf("task is required")
+	}
 	e.mu.Lock()
+	if _, exists := e.cancelFuncs[task.ID]; exists {
+		e.mu.Unlock()
+		return fmt.Errorf("task %s is already running", task.ID)
+	}
 	execCtx, cancel := context.WithCancel(ctx)
 	e.cancelFuncs[task.ID] = cancel
 	e.mu.Unlock()
 
+	if err := e.registry.Update(task.ID, func(state TaskState) TaskState {
+		current := state.(*RemoteAgentTaskState)
+		current.Status = TaskStatusRunning
+		current.IsBackgrounded = true
+		return current
+	}); err != nil {
+		cancel()
+		e.mu.Lock()
+		delete(e.cancelFuncs, task.ID)
+		e.mu.Unlock()
+		return err
+	}
 	task.Status = TaskStatusRunning
 	task.IsBackgrounded = true
-	e.registry.Register(task)
 
 	go func() {
 		defer func() {
@@ -113,17 +175,22 @@ func (e *Executor) ExecuteRemoteAgent(ctx context.Context, task *RemoteAgentTask
 			e.mu.Unlock()
 		}()
 
-		result, err := handler(execCtx, task)
-		if err != nil {
-			task.Error = err.Error()
-			task.Status = TaskStatusFailed
-		} else {
-			task.Status = TaskStatusCompleted
-			_ = result
-		}
-		now := time.Now()
-		task.EndTime = &now
-		e.registry.Register(task)
+		_, runErr := handler(execCtx, task)
+		_ = e.registry.Update(task.ID, func(state TaskState) TaskState {
+			current := state.(*RemoteAgentTaskState)
+			if current.Status == TaskStatusKilled {
+				return current
+			}
+			if runErr != nil {
+				current.Error = runErr.Error()
+				current.Status = TaskStatusFailed
+			} else {
+				current.Status = TaskStatusCompleted
+			}
+			now := time.Now()
+			current.EndTime = &now
+			return current
+		})
 	}()
 
 	return nil
@@ -139,13 +206,20 @@ func (e *Executor) KillTask(taskID string) error {
 		return fmt.Errorf("task %s not found or not running", taskID)
 	}
 
-	cancel()
-
-	task := e.registry.Get(taskID)
-	if task != nil {
-		KillTask(task)
-		e.registry.Register(task)
+	var transitionErr error
+	if err := e.registry.Update(taskID, func(task TaskState) TaskState {
+		if task.GetBase().Status != TaskStatusPending && task.GetBase().Status != TaskStatusRunning {
+			transitionErr = fmt.Errorf("task %s is already %s", taskID, task.GetBase().Status)
+			return task
+		}
+		return KillTask(task)
+	}); err != nil {
+		return err
 	}
+	if transitionErr != nil {
+		return transitionErr
+	}
+	cancel()
 
 	return nil
 }
@@ -193,7 +267,7 @@ func (m *Manager) SpawnLocalAgent(ctx context.Context, prompt, agentType, descri
 		return nil, err
 	}
 
-	m.store.Update(func(state *types.AppState) *types.AppState {
+	m.updateStore(func(state *types.AppState) *types.AppState {
 		state.Tasks[id] = types.TaskStateBase{
 			Id:          id,
 			Type:        types.TaskTypeLocalAgent,
@@ -218,7 +292,7 @@ func (m *Manager) SpawnLocalShell(ctx context.Context, command, directory, descr
 		return nil, err
 	}
 
-	m.store.Update(func(state *types.AppState) *types.AppState {
+	m.updateStore(func(state *types.AppState) *types.AppState {
 		state.Tasks[id] = types.TaskStateBase{
 			Id:          id,
 			Type:        types.TaskTypeLocalBash,
@@ -242,7 +316,7 @@ func (m *Manager) SpawnRemoteAgent(ctx context.Context, command, sessionID, desc
 		return nil, err
 	}
 
-	m.store.Update(func(state *types.AppState) *types.AppState {
+	m.updateStore(func(state *types.AppState) *types.AppState {
 		state.Tasks[id] = types.TaskStateBase{
 			Id:          id,
 			Type:        types.TaskTypeRemoteAgent,
@@ -265,6 +339,16 @@ func (m *Manager) GetTask(id string) TaskState {
 // GetAllTasks returns all tasks.
 func (m *Manager) GetAllTasks() map[string]TaskState {
 	return m.registry.GetAll()
+}
+
+// SetAgentModel records the requested model override before execution starts.
+func (m *Manager) SetAgentModel(id, model string) error {
+	return m.registry.Update(id, func(state TaskState) TaskState {
+		if task, ok := state.(*LocalAgentTaskState); ok {
+			task.Model = model
+		}
+		return state
+	})
 }
 
 // GetBackgroundTasks returns all background tasks.
@@ -290,7 +374,7 @@ func (m *Manager) KillTask(id string) error {
 		return err
 	}
 
-	m.store.Update(func(state *types.AppState) *types.AppState {
+	m.updateStore(func(state *types.AppState) *types.AppState {
 		if t, ok := state.Tasks[id]; ok {
 			t.Status = types.TaskStatusKilled
 			now := time.Now()
@@ -302,6 +386,12 @@ func (m *Manager) KillTask(id string) error {
 
 	m.notifyTaskKilled(task)
 	return nil
+}
+
+func (m *Manager) updateStore(update func(*types.AppState) *types.AppState) {
+	if m.store != nil {
+		m.store.Update(update)
+	}
 }
 
 // RetrieveTask retrieves a task result.
@@ -320,7 +410,10 @@ func (m *Manager) RetrieveTask(id string) (interface{}, error) {
 		return nil, fmt.Errorf("task %s is still running", id)
 	}
 
-	agentTask.Retrieved = true
+	_ = m.registry.Update(id, func(state TaskState) TaskState {
+		state.(*LocalAgentTaskState).Retrieved = true
+		return state
+	})
 	m.notifyTaskRetrieved(agentTask)
 
 	return agentTask.Result, nil
@@ -441,13 +534,15 @@ func (m *Manager) UpdateProgress(taskID string, progress AgentProgress) error {
 		return fmt.Errorf("task %s not found", taskID)
 	}
 
-	agentTask, ok := task.(*LocalAgentTaskState)
+	_, ok := task.(*LocalAgentTaskState)
 	if !ok {
 		return fmt.Errorf("task %s is not a local agent task", taskID)
 	}
 
-	agentTask.Progress = &progress
-	return nil
+	return m.registry.Update(taskID, func(state TaskState) TaskState {
+		state.(*LocalAgentTaskState).Progress = &progress
+		return state
+	})
 }
 
 // AddToolActivity adds a tool activity to progress tracking.
@@ -457,26 +552,23 @@ func (m *Manager) AddToolActivity(taskID string, activity ToolActivity) error {
 		return fmt.Errorf("task %s not found", taskID)
 	}
 
-	agentTask, ok := task.(*LocalAgentTaskState)
+	_, ok := task.(*LocalAgentTaskState)
 	if !ok {
 		return fmt.Errorf("task %s is not a local agent task", taskID)
 	}
 
-	if agentTask.Progress == nil {
-		agentTask.Progress = &AgentProgress{}
-	}
-
-	agentTask.Progress.ToolUseCount++
-	agentTask.Progress.RecentActivities = append(
-		agentTask.Progress.RecentActivities,
-		activity,
-	)
-
-	if len(agentTask.Progress.RecentActivities) > 10 {
-		agentTask.Progress.RecentActivities = agentTask.Progress.RecentActivities[len(agentTask.Progress.RecentActivities)-10:]
-	}
-
-	return nil
+	return m.registry.Update(taskID, func(state TaskState) TaskState {
+		current := state.(*LocalAgentTaskState)
+		if current.Progress == nil {
+			current.Progress = &AgentProgress{}
+		}
+		current.Progress.ToolUseCount++
+		current.Progress.RecentActivities = append(current.Progress.RecentActivities, activity)
+		if len(current.Progress.RecentActivities) > 10 {
+			current.Progress.RecentActivities = current.Progress.RecentActivities[len(current.Progress.RecentActivities)-10:]
+		}
+		return current
+	})
 }
 
 // =============================================================================

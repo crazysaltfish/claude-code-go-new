@@ -39,7 +39,7 @@ func (r *Registry) Register(task TaskState) error {
 		return fmt.Errorf("task %s already exists", id)
 	}
 
-	r.tasks[id] = task
+	r.tasks[id] = cloneTask(task)
 	return nil
 }
 
@@ -57,7 +57,7 @@ func (r *Registry) Get(taskID string) TaskState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return r.tasks[taskID]
+	return cloneTask(r.tasks[taskID])
 }
 
 // GetAll returns all tasks.
@@ -67,7 +67,7 @@ func (r *Registry) GetAll() map[string]TaskState {
 
 	result := make(map[string]TaskState)
 	for k, v := range r.tasks {
-		result[k] = v
+		result[k] = cloneTask(v)
 	}
 	return result
 }
@@ -82,8 +82,50 @@ func (r *Registry) Update(taskID string, updateFn func(TaskState) TaskState) err
 		return fmt.Errorf("task %s not found", taskID)
 	}
 
-	r.tasks[taskID] = updateFn(task)
+	r.tasks[taskID] = cloneTask(updateFn(task))
 	return nil
+}
+
+// cloneTask returns a detached snapshot so callers cannot race with executor
+// state transitions by mutating a task stored in the registry.
+func cloneTask(task TaskState) TaskState {
+	switch source := task.(type) {
+	case *LocalAgentTaskState:
+		if source == nil {
+			return nil
+		}
+		copy := *source
+		copy.PendingMessages = append([]string(nil), source.PendingMessages...)
+		copy.Messages = append([]interface{}(nil), source.Messages...)
+		if source.Progress != nil {
+			progress := *source.Progress
+			progress.RecentActivities = append([]ToolActivity(nil), source.Progress.RecentActivities...)
+			if source.Progress.LastActivity != nil {
+				activity := *source.Progress.LastActivity
+				progress.LastActivity = &activity
+			}
+			copy.Progress = &progress
+		}
+		return &copy
+	case *LocalShellTaskState:
+		if source == nil {
+			return nil
+		}
+		copy := *source
+		if source.ExitCode != nil {
+			exitCode := *source.ExitCode
+			copy.ExitCode = &exitCode
+		}
+		return &copy
+	case *RemoteAgentTaskState:
+		if source == nil {
+			return nil
+		}
+		copy := *source
+		return &copy
+	default:
+		return nil
+	}
 }
 
 // =============================================================================

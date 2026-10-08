@@ -788,6 +788,44 @@ func TestBuildSystemPromptAppendsMemoryAfterCustomPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPromptUsesConfiguredContextAndCurrentWorkingDirectories(t *testing.T) {
+	state := &types.AppState{
+		ToolPermissionContext: types.ToolPermissionContext{
+			AdditionalWorkingDirectories: map[string]types.AdditionalWorkingDirectory{
+				"/workspace/docs": {Path: "/workspace/docs"},
+			},
+		},
+	}
+	engine := NewQueryEngine(QueryEngineConfig{
+		Cwd:                          "/workspace/project",
+		UserSpecifiedModel:           "test-model",
+		AdditionalWorkingDirectories: []string{"/workspace/shared", "/workspace/docs"},
+		LanguagePreference:           "Chinese",
+		ScratchpadDir:                "/workspace/scratchpad",
+		GetAppState:                  func() *types.AppState { return state },
+	})
+
+	first := engine.buildSystemPrompt()
+	for _, want := range []string{
+		"Additional working directories: /workspace/docs, /workspace/shared",
+		"Always respond in Chinese.",
+		"/workspace/scratchpad",
+	} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("system prompt missing %q", want)
+		}
+	}
+	if strings.Count(first, "/workspace/docs") != 1 {
+		t.Fatalf("system prompt repeated an additional working directory")
+	}
+
+	state.ToolPermissionContext.AdditionalWorkingDirectories["/workspace/next"] = types.AdditionalWorkingDirectory{Path: "/workspace/next"}
+	second := engine.buildSystemPrompt()
+	if !strings.Contains(second, "Additional working directories: /workspace/docs, /workspace/next, /workspace/shared") {
+		t.Fatal("system prompt did not include a directory added during the session")
+	}
+}
+
 func TestQueryEngineRecallsMemoryOnceAndInjectsItAsContext(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "editor.md")

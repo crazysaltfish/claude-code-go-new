@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -27,31 +28,34 @@ import (
 
 // QueryEngineConfig contains configuration for the QueryEngine.
 type QueryEngineConfig struct {
-	SessionID          string
-	Cwd                string
-	Tools              []types.Tool
-	Commands           []types.Command
-	MCPClients         []types.MCPServerConnection
-	CanUseTool         types.CanUseToolFunc
-	GetAppState        func() *types.AppState
-	SetAppState        func(func(*types.AppState) *types.AppState)
-	InitialMessages    []types.Message
-	ReadFileCache      types.FileStateCache
-	CustomSystemPrompt string
-	AppendSystemPrompt string
-	MemoryPrompt       string
-	MemoryDirectory    string
-	MemorySelector     memory.Selector
-	SessionMemory      *memory.SessionMemory
-	UserSpecifiedModel string
-	FallbackModel      string
-	ThinkingConfig     *types.ThinkingConfig
-	MaxTokens          int
-	MaxTurns           int
-	MaxBudgetUsd       float64
-	Verbose            bool
-	AbortController    *types.AbortController
-	APIClient          api.MessageClient
+	SessionID                    string
+	Cwd                          string
+	Tools                        []types.Tool
+	Commands                     []types.Command
+	MCPClients                   []types.MCPServerConnection
+	CanUseTool                   types.CanUseToolFunc
+	GetAppState                  func() *types.AppState
+	SetAppState                  func(func(*types.AppState) *types.AppState)
+	InitialMessages              []types.Message
+	ReadFileCache                types.FileStateCache
+	CustomSystemPrompt           string
+	AppendSystemPrompt           string
+	AdditionalWorkingDirectories []string
+	LanguagePreference           string
+	ScratchpadDir                string
+	MemoryPrompt                 string
+	MemoryDirectory              string
+	MemorySelector               memory.Selector
+	SessionMemory                *memory.SessionMemory
+	UserSpecifiedModel           string
+	FallbackModel                string
+	ThinkingConfig               *types.ThinkingConfig
+	MaxTokens                    int
+	MaxTurns                     int
+	MaxBudgetUsd                 float64
+	Verbose                      bool
+	AbortController              *types.AbortController
+	APIClient                    api.MessageClient
 }
 
 // QueryEngine owns the query lifecycle and session state for a conversation.
@@ -776,6 +780,17 @@ func (e *QueryEngine) buildSystemPrompt() string {
 		// Get model ID
 		modelId := e.getModel()
 
+		additionalWorkingDirectories := append([]string(nil), e.config.AdditionalWorkingDirectories...)
+		if e.config.GetAppState != nil {
+			if appState := e.config.GetAppState(); appState != nil {
+				for path := range appState.ToolPermissionContext.AdditionalWorkingDirectories {
+					additionalWorkingDirectories = append(additionalWorkingDirectories, path)
+				}
+			}
+		}
+		sort.Strings(additionalWorkingDirectories)
+		additionalWorkingDirectories = slices.Compact(additionalWorkingDirectories)
+
 		// Build the complete system prompt
 		prompt = constants.BuildSystemPrompt(
 			cwd,
@@ -784,9 +799,9 @@ func (e *QueryEngine) buildSystemPrompt() string {
 			shell,
 			getOSVersion(),
 			modelId,
-			nil, // additional working directories
-			"",  // language preference
-			"",  // scratchpad dir
+			additionalWorkingDirectories,
+			e.config.LanguagePreference,
+			e.config.ScratchpadDir,
 		)
 	}
 

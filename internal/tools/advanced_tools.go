@@ -292,170 +292,181 @@ func (t *LSPTool) IsConcurrencySafe(input json.RawMessage) bool {
 }
 
 // =============================================================================
-// Task Management Tools
+// Agent Tool
 // =============================================================================
 
-// TaskCreateTool creates new tasks.
-type TaskCreateTool struct {
+// AgentTool spawns and manages sub-agents.
+type AgentTool struct {
 	*BaseTool
-	mu    sync.RWMutex
-	tasks map[string]*Task
+	taskManager *tasks.Manager
+	runner      AgentRunner
 }
 
-// Task represents a task in the system.
-type Task struct {
-	ID          string                 `json:"id"`
-	Subject     string                 `json:"subject"`
-	Description string                 `json:"description"`
-	ActiveForm  string                 `json:"activeForm,omitempty"`
-	Status      string                 `json:"status"`
-	Owner       string                 `json:"owner,omitempty"`
-	Metadata    map[string]interface{} `json:"metadata,omitempty"`
-	CreatedAt   time.Time              `json:"createdAt"`
-	UpdatedAt   time.Time              `json:"updatedAt"`
+// AgentRunner executes one isolated sub-agent query.
+type AgentRunner func(context.Context, *tasks.LocalAgentTaskState, *types.ToolContext, func(interface{})) (interface{}, error)
+
+// SetTaskManager sets the task manager for the agent tool.
+func (t *AgentTool) SetTaskManager(mgr *tasks.Manager) {
+	t.taskManager = mgr
 }
 
-// NewTaskCreateTool creates a new task create tool.
-func NewTaskCreateTool() *TaskCreateTool {
-	return &TaskCreateTool{
+// SetRunner configures the query implementation used by spawned agents.
+func (t *AgentTool) SetRunner(runner AgentRunner) {
+	t.runner = runner
+}
+
+// NewAgentTool creates a new Agent tool.
+func NewAgentTool() *AgentTool {
+	return &AgentTool{
 		BaseTool: &BaseTool{
-			name:        constants.ToolTaskCreate,
-			description: "Create a new task in the task list",
+			name:        constants.ToolAgent,
+			aliases:     []string{"Task"},
+			description: "Spawn a sub-agent to handle complex, multi-step tasks autonomously",
 			inputSchema: types.ToolInputJSONSchema{
 				Type: "object",
 				Properties: map[string]map[string]interface{}{
-					"subject": {
-						"type":        "string",
-						"description": "A brief title for the task",
-					},
 					"description": {
 						"type":        "string",
-						"description": "What needs to be done",
+						"description": "A short (3-5 word) description of the task",
 					},
-					"activeForm": {
+					"prompt": {
 						"type":        "string",
-						"description": "Present continuous form shown in spinner when in_progress",
+						"description": "The task for the agent to perform",
 					},
-					"metadata": {
-						"type":        "object",
-						"description": "Arbitrary metadata to attach to the task",
+					"subagent_type": {
+						"type":        "string",
+						"description": "The type of specialized agent to use for this task",
+					},
+					"model": {
+						"type":        "string",
+						"enum":        []string{"sonnet", "opus", "haiku"},
+						"description": "Optional model override for this agent",
+					},
+					"run_in_background": {
+						"type":        "boolean",
+						"description": "Set to true to run this agent in the background",
 					},
 				},
-				Required: []string{"subject", "description"},
+				Required: []string{"description", "prompt"},
 			},
 			isEnabled:  true,
 			isReadOnly: false,
 		},
-		tasks: make(map[string]*Task),
 	}
 }
 
-// Call creates a new task.
-func (t *TaskCreateTool) Call(ctx context.Context, args json.RawMessage, toolCtx *types.ToolContext, canUseTool types.CanUseToolFunc, parentMessage *types.Message, onProgress func(progress interface{})) (*types.ToolResult, error) {
+// Call spawns a sub-agent.
+func (t *AgentTool) Call(ctx context.Context, args json.RawMessage, toolCtx *types.ToolContext, canUseTool types.CanUseToolFunc, parentMessage *types.Message, onProgress func(progress interface{})) (*types.ToolResult, error) {
 	var input struct {
-		Subject     string                 `json:"subject"`
-		Description string                 `json:"description"`
-		ActiveForm  string                 `json:"activeForm,omitempty"`
-		Metadata    map[string]interface{} `json:"metadata,omitempty"`
+		Description     string `json:"description"`
+		Prompt          string `json:"prompt"`
+		SubagentType    string `json:"subagent_type,omitempty"`
+		Model           string `json:"model,omitempty"`
+		RunInBackground bool   `json:"run_in_background,omitempty"`
 	}
 	if err := json.Unmarshal(args, &input); err != nil {
 		return nil, fmt.Errorf("failed to parse input: %w", err)
 	}
-	input.Subject = strings.TrimSpace(input.Subject)
 	input.Description = strings.TrimSpace(input.Description)
-	if input.Subject == "" || input.Description == "" {
-		return nil, fmt.Errorf("subject and description are required")
+	input.Prompt = strings.TrimSpace(input.Prompt)
+	if input.Description == "" || input.Prompt == "" {
+		return nil, fmt.Errorf("description and prompt are required")
 	}
 
-	// Generate task ID
-	taskID := generateTaskID()
-
-	task := &Task{
-		ID:          taskID,
-		Subject:     input.Subject,
-		Description: input.Description,
-		ActiveForm:  input.ActiveForm,
-		Status:      "pending",
-		Metadata:    input.Metadata,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+	// Determine agent type
+	agentType := input.SubagentType
+	if agentType == "" {
+		agentType = "general-agent"
 	}
 
-	t.mu.Lock()
-	t.tasks[taskID] = task
-	t.mu.Unlock()
+	if t.taskManager == nil || t.runner == nil {
+		return nil, fmt.Errorf("agent runtime is not configured")
+	}
 
-	return &types.ToolResult{
-		Output:    fmt.Sprintf("Task #%s created successfully: %s", taskID, input.Subject),
-		ToolUseID: toolCtx.ToolUseId,
+	task, err := t.taskManager.SpawnLocalAgent(ctx, input.Prompt, agentType, input.Description, input.RunInBackground)
+	if err != nil {
+		return nil, fmt.Errorf("failed to spawn agent task: %w", err)
+	}
+	if err := t.taskManager.SetAgentModel(task.ID, input.Model); err != nil {
+		return nil, err
+	}
+	task.Model = input.Model
+	executionCtx := ctx
+	if input.RunInBackground {
+		executionCtx = context.WithoutCancel(ctx)
+	}
+	if err := t.taskManager.StartExecution(executionCtx, task.ID, func(runCtx context.Context, state *tasks.LocalAgentTaskState) (interface{}, error) {
+		return t.runner(runCtx, state, toolCtx, onProgress)
+	}); err != nil {
+		return nil, fmt.Errorf("failed to start agent task: %w", err)
+	}
+
+	toolUseID := ""
+	if toolCtx != nil {
+		toolUseID = toolCtx.ToolUseId
+	}
+	if input.RunInBackground {
+		return &types.ToolResult{
+			Output:    fmt.Sprintf("Agent task '%s' started in background.\nTask ID: %s", input.Description, task.ID),
+			ToolUseID: toolUseID,
+		}, nil
+	}
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		current := t.taskManager.GetTask(task.ID)
+		if current == nil {
+			return nil, fmt.Errorf("agent task %s disappeared", task.ID)
+		}
+		state := current.(*tasks.LocalAgentTaskState)
+		switch state.Status {
+		case tasks.TaskStatusCompleted:
+			return &types.ToolResult{Output: state.Result, ToolUseID: toolUseID}, nil
+		case tasks.TaskStatusFailed:
+			return &types.ToolResult{Output: state.Error, Error: fmt.Errorf("agent task failed: %s", state.Error), ToolUseID: toolUseID}, nil
+		case tasks.TaskStatusKilled:
+			return &types.ToolResult{Output: "Agent task was stopped", Error: context.Canceled, ToolUseID: toolUseID}, nil
+		}
+		select {
+		case <-ctx.Done():
+			_ = t.taskManager.KillTask(task.ID)
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// CheckPermissions checks agent permissions.
+func (t *AgentTool) CheckPermissions(ctx context.Context, input json.RawMessage, context *types.ToolContext) (*types.PermissionResult, error) {
+	return &types.PermissionResult{
+		Behavior: types.PermissionBehaviorAllow,
 	}, nil
 }
 
-// GetTask retrieves a task by ID.
-func (t *TaskCreateTool) GetTask(id string) (*Task, bool) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	task, ok := t.tasks[id]
-	return cloneManagedTask(task), ok
+// UserFacingName returns the user-facing name.
+func (t *AgentTool) UserFacingName(input json.RawMessage) string {
+	var inputData struct {
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(input, &inputData); err == nil && inputData.Description != "" {
+		return inputData.Description
+	}
+	return "Agent"
 }
 
-func (t *TaskCreateTool) updateTask(id string, update func(*Task) error) (*Task, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	task, ok := t.tasks[id]
-	if !ok {
-		return nil, fmt.Errorf("task not found: %s", id)
-	}
-	if err := update(task); err != nil {
-		return nil, err
-	}
-	task.UpdatedAt = time.Now()
-	return cloneManagedTask(task), nil
-}
-
-func (t *TaskCreateTool) listTasks() []*Task {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	result := make([]*Task, 0, len(t.tasks))
-	for _, task := range t.tasks {
-		result = append(result, cloneManagedTask(task))
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
-			return result[i].ID < result[j].ID
-		}
-		return result[i].CreatedAt.Before(result[j].CreatedAt)
-	})
-	return result
-}
-
-func cloneManagedTask(task *Task) *Task {
-	if task == nil {
-		return nil
-	}
-	copy := *task
-	if task.Metadata != nil {
-		copy.Metadata = make(map[string]interface{}, len(task.Metadata))
-		for key, value := range task.Metadata {
-			copy.Metadata[key] = value
-		}
-	}
-	return &copy
-}
+// =============================================================================
+// Task Management Tools
+// =============================================================================
 
 // TaskListTool lists all tasks.
 type TaskListTool struct {
 	*BaseTool
-	taskCreateTool *TaskCreateTool
-	taskManager    *tasks.Manager
+	taskManager *tasks.Manager
 }
 
 // NewTaskListTool creates a new task list tool.
-func NewTaskListTool(taskCreateTool *TaskCreateTool, managers ...*tasks.Manager) *TaskListTool {
-	var taskManager *tasks.Manager
-	if len(managers) > 0 {
-		taskManager = managers[0]
-	}
+func NewTaskListTool(taskManager *tasks.Manager) *TaskListTool {
 	return &TaskListTool{
 		BaseTool: &BaseTool{
 			name:        constants.ToolTaskList,
@@ -465,7 +476,7 @@ func NewTaskListTool(taskCreateTool *TaskCreateTool, managers ...*tasks.Manager)
 				Properties: map[string]map[string]interface{}{
 					"status": {
 						"type":        "string",
-						"enum":        []string{"pending", "in_progress", "running", "completed", "failed", "cancelled", "killed"},
+						"enum":        []string{"pending", "running", "completed", "failed", "killed"},
 						"description": "Filter by status",
 					},
 				},
@@ -473,8 +484,7 @@ func NewTaskListTool(taskCreateTool *TaskCreateTool, managers ...*tasks.Manager)
 			isEnabled:  true,
 			isReadOnly: true,
 		},
-		taskCreateTool: taskCreateTool,
-		taskManager:    taskManager,
+		taskManager: taskManager,
 	}
 }
 
@@ -490,43 +500,29 @@ func (t *TaskListTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 	var result strings.Builder
 	result.WriteString("Tasks:\n")
 
-	for _, task := range t.taskCreateTool.listTasks() {
-		if input.Status != "" && task.Status != input.Status {
+	if t.taskManager == nil {
+		return nil, fmt.Errorf("task manager is not configured")
+	}
+	executionTasks := t.taskManager.GetAllTasks()
+	ids := make([]string, 0, len(executionTasks))
+	for id := range executionTasks {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		task := executionTasks[id].GetBase()
+		if input.Status != "" && string(task.Status) != input.Status {
 			continue
 		}
-
-		statusIcon := "○"
-		switch task.Status {
-		case "in_progress":
-			statusIcon = "◐"
-		case "completed":
+		statusIcon := "◐"
+		if task.Status == tasks.TaskStatusPending {
+			statusIcon = "○"
+		} else if task.Status == tasks.TaskStatusCompleted {
 			statusIcon = "●"
-		case "cancelled":
+		} else if task.Status == tasks.TaskStatusFailed || task.Status == tasks.TaskStatusKilled {
 			statusIcon = "✗"
 		}
-
-		result.WriteString(fmt.Sprintf("  %s [#%s] %s\n", statusIcon, task.ID, task.Subject))
-	}
-	if t.taskManager != nil {
-		executionTasks := t.taskManager.GetAllTasks()
-		ids := make([]string, 0, len(executionTasks))
-		for id := range executionTasks {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		for _, id := range ids {
-			task := executionTasks[id].GetBase()
-			if input.Status != "" && string(task.Status) != input.Status {
-				continue
-			}
-			statusIcon := "◐"
-			if task.Status == tasks.TaskStatusCompleted {
-				statusIcon = "●"
-			} else if task.Status == tasks.TaskStatusFailed || task.Status == tasks.TaskStatusKilled {
-				statusIcon = "✗"
-			}
-			result.WriteString(fmt.Sprintf("  %s [#%s] %s (%s)\n", statusIcon, task.ID, task.Description, task.Status))
-		}
+		result.WriteString(fmt.Sprintf("  %s [#%s] %s (%s)\n", statusIcon, task.ID, task.Description, task.Status))
 	}
 
 	return &types.ToolResult{
@@ -538,16 +534,11 @@ func (t *TaskListTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 // TaskStopTool stops a running task.
 type TaskStopTool struct {
 	*BaseTool
-	taskCreateTool *TaskCreateTool
-	taskManager    *tasks.Manager
+	taskManager *tasks.Manager
 }
 
 // NewTaskStopTool creates a new task stop tool.
-func NewTaskStopTool(taskCreateTool *TaskCreateTool, managers ...*tasks.Manager) *TaskStopTool {
-	var taskManager *tasks.Manager
-	if len(managers) > 0 {
-		taskManager = managers[0]
-	}
+func NewTaskStopTool(taskManager *tasks.Manager) *TaskStopTool {
 	return &TaskStopTool{
 		BaseTool: &BaseTool{
 			name:        constants.ToolTaskStop,
@@ -565,8 +556,7 @@ func NewTaskStopTool(taskCreateTool *TaskCreateTool, managers ...*tasks.Manager)
 			isEnabled:  true,
 			isReadOnly: false,
 		},
-		taskCreateTool: taskCreateTool,
-		taskManager:    taskManager,
+		taskManager: taskManager,
 	}
 }
 
@@ -583,48 +573,35 @@ func (t *TaskStopTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 	if input.TaskID == "" {
 		return nil, fmt.Errorf("task_id is required")
 	}
-	task, err := t.taskCreateTool.updateTask(input.TaskID, func(task *Task) error {
-		if task.Status == "completed" || task.Status == "cancelled" {
-			return fmt.Errorf("task %s is already %s", task.ID, task.Status)
-		}
-		task.Status = "cancelled"
-		return nil
-	})
-	if err != nil {
-		if t.taskManager != nil && t.taskManager.GetTask(input.TaskID) != nil {
-			if killErr := t.taskManager.KillTask(input.TaskID); killErr != nil {
-				return &types.ToolResult{Error: killErr, ToolUseID: toolCtx.ToolUseId}, nil
-			}
-			return &types.ToolResult{Output: fmt.Sprintf("Task #%s stopped", input.TaskID), ToolUseID: toolCtx.ToolUseId}, nil
-		}
+	if t.taskManager == nil {
 		return &types.ToolResult{
-			Error:     err,
+			Error:     fmt.Errorf("task manager is not configured"),
 			ToolUseID: toolCtx.ToolUseId,
 		}, nil
 	}
-
-	return &types.ToolResult{
-		Output:    fmt.Sprintf("Task #%s stopped", task.ID),
-		ToolUseID: toolCtx.ToolUseId,
-	}, nil
+	if t.taskManager.GetTask(input.TaskID) == nil {
+		return &types.ToolResult{
+			Error:     fmt.Errorf("task not found: %s", input.TaskID),
+			ToolUseID: toolCtx.ToolUseId,
+		}, nil
+	}
+	if err := t.taskManager.KillTask(input.TaskID); err != nil {
+		return &types.ToolResult{Error: err, ToolUseID: toolCtx.ToolUseId}, nil
+	}
+	return &types.ToolResult{Output: fmt.Sprintf("Task #%s stopped", input.TaskID), ToolUseID: toolCtx.ToolUseId}, nil
 }
 
 // TaskGetTool gets details of a specific task.
 type TaskGetTool struct {
 	*BaseTool
-	taskCreateTool *TaskCreateTool
-	taskManager    *tasks.Manager
+	taskManager *tasks.Manager
 }
 
 // NewTaskGetTool creates a new task get tool.
-func NewTaskGetTool(taskCreateTool *TaskCreateTool, managers ...*tasks.Manager) *TaskGetTool {
-	var taskManager *tasks.Manager
-	if len(managers) > 0 {
-		taskManager = managers[0]
-	}
+func NewTaskGetTool(taskManager *tasks.Manager) *TaskGetTool {
 	return &TaskGetTool{
 		BaseTool: &BaseTool{
-			name:        "TaskGet",
+			name:        constants.ToolTaskGet,
 			description: "Get details of a specific task",
 			inputSchema: types.ToolInputJSONSchema{
 				Type: "object",
@@ -639,8 +616,7 @@ func NewTaskGetTool(taskCreateTool *TaskCreateTool, managers ...*tasks.Manager) 
 			isEnabled:  true,
 			isReadOnly: true,
 		},
-		taskCreateTool: taskCreateTool,
-		taskManager:    taskManager,
+		taskManager: taskManager,
 	}
 }
 
@@ -657,118 +633,27 @@ func (t *TaskGetTool) Call(ctx context.Context, args json.RawMessage, toolCtx *t
 		return nil, fmt.Errorf("task_id is required")
 	}
 
-	task, ok := t.taskCreateTool.GetTask(input.TaskID)
-	if !ok {
-		if t.taskManager != nil {
-			if executionTask := t.taskManager.GetTask(input.TaskID); executionTask != nil {
-				base := executionTask.GetBase()
-				result := fmt.Sprintf("Task #%s\n  Status: %s\n  Description: %s\n  Created: %s\n", base.ID, base.Status, base.Description, base.StartTime.Format(time.RFC3339))
-				if base.EndTime != nil {
-					result += fmt.Sprintf("  Finished: %s\n", base.EndTime.Format(time.RFC3339))
-				}
-				return &types.ToolResult{Output: result, ToolUseID: toolCtx.ToolUseId}, nil
-			}
-		}
+	if t.taskManager == nil {
+		return &types.ToolResult{
+			Error:     fmt.Errorf("task manager is not configured"),
+			ToolUseID: toolCtx.ToolUseId,
+		}, nil
+	}
+	executionTask := t.taskManager.GetTask(input.TaskID)
+	if executionTask == nil {
 		return &types.ToolResult{
 			Error:     fmt.Errorf("task not found: %s", input.TaskID),
 			ToolUseID: toolCtx.ToolUseId,
 		}, nil
 	}
-
-	result := fmt.Sprintf("Task #%s\n", task.ID)
-	result += fmt.Sprintf("  Subject: %s\n", task.Subject)
-	result += fmt.Sprintf("  Status: %s\n", task.Status)
-	result += fmt.Sprintf("  Description: %s\n", task.Description)
-	if task.ActiveForm != "" {
-		result += fmt.Sprintf("  Active Form: %s\n", task.ActiveForm)
+	base := executionTask.GetBase()
+	result := fmt.Sprintf("Task #%s\n  Status: %s\n  Description: %s\n  Created: %s\n", base.ID, base.Status, base.Description, base.StartTime.Format(time.RFC3339))
+	if base.EndTime != nil {
+		result += fmt.Sprintf("  Finished: %s\n", base.EndTime.Format(time.RFC3339))
 	}
-	result += fmt.Sprintf("  Created: %s\n", task.CreatedAt.Format(time.RFC3339))
-	result += fmt.Sprintf("  Updated: %s\n", task.UpdatedAt.Format(time.RFC3339))
 
 	return &types.ToolResult{
 		Output:    result,
-		ToolUseID: toolCtx.ToolUseId,
-	}, nil
-}
-
-// TaskUpdateTool updates a task.
-type TaskUpdateTool struct {
-	*BaseTool
-	taskCreateTool *TaskCreateTool
-}
-
-// NewTaskUpdateTool creates a new task update tool.
-func NewTaskUpdateTool(taskCreateTool *TaskCreateTool) *TaskUpdateTool {
-	return &TaskUpdateTool{
-		BaseTool: &BaseTool{
-			name:        "TaskUpdate",
-			description: "Update a task's status or properties",
-			inputSchema: types.ToolInputJSONSchema{
-				Type: "object",
-				Properties: map[string]map[string]interface{}{
-					"task_id": {
-						"type":        "string",
-						"description": "The ID of the task to update",
-					},
-					"status": {
-						"type":        "string",
-						"enum":        []string{"pending", "in_progress", "completed", "cancelled"},
-						"description": "New status for the task",
-					},
-					"subject": {
-						"type":        "string",
-						"description": "New subject for the task",
-					},
-					"description": {
-						"type":        "string",
-						"description": "New description for the task",
-					},
-				},
-				Required: []string{"task_id"},
-			},
-			isEnabled:  true,
-			isReadOnly: false,
-		},
-		taskCreateTool: taskCreateTool,
-	}
-}
-
-// Call updates a task.
-func (t *TaskUpdateTool) Call(ctx context.Context, args json.RawMessage, toolCtx *types.ToolContext, canUseTool types.CanUseToolFunc, parentMessage *types.Message, onProgress func(progress interface{})) (*types.ToolResult, error) {
-	var input struct {
-		TaskID      string `json:"task_id"`
-		Status      string `json:"status,omitempty"`
-		Subject     string `json:"subject,omitempty"`
-		Description string `json:"description,omitempty"`
-	}
-	if err := json.Unmarshal(args, &input); err != nil {
-		return nil, fmt.Errorf("failed to parse input: %w", err)
-	}
-
-	if input.Status == "" && input.Subject == "" && input.Description == "" {
-		return nil, fmt.Errorf("at least one field must be provided")
-	}
-	_, err := t.taskCreateTool.updateTask(input.TaskID, func(task *Task) error {
-		if input.Status != "" {
-			task.Status = input.Status
-		}
-		if input.Subject != "" {
-			task.Subject = input.Subject
-		}
-		if input.Description != "" {
-			task.Description = input.Description
-		}
-		return nil
-	})
-	if err != nil {
-		return &types.ToolResult{
-			Error:     err,
-			ToolUseID: toolCtx.ToolUseId,
-		}, nil
-	}
-
-	return &types.ToolResult{
-		Output:    fmt.Sprintf("Task #%s updated successfully", input.TaskID),
 		ToolUseID: toolCtx.ToolUseId,
 	}, nil
 }
@@ -779,13 +664,8 @@ type TaskOutputTool struct {
 	taskManager *tasks.Manager
 }
 
-// SetTaskManager sets the task manager for the tool.
-func (t *TaskOutputTool) SetTaskManager(mgr *tasks.Manager) {
-	t.taskManager = mgr
-}
-
 // NewTaskOutputTool creates a new Task Output tool.
-func NewTaskOutputTool() *TaskOutputTool {
+func NewTaskOutputTool(taskManager *tasks.Manager) *TaskOutputTool {
 	return &TaskOutputTool{
 		BaseTool: &BaseTool{
 			name:        "TaskOutput",
@@ -814,6 +694,7 @@ func NewTaskOutputTool() *TaskOutputTool {
 			isEnabled:  true,
 			isReadOnly: true,
 		},
+		taskManager: taskManager,
 	}
 }
 
@@ -1287,170 +1168,6 @@ func (t *ConfigTool) Call(ctx context.Context, args json.RawMessage, toolCtx *ty
 			ToolUseID: toolCtx.ToolUseId,
 		}, nil
 	}
-}
-
-// =============================================================================
-// Agent Tool
-// =============================================================================
-
-// AgentTool spawns and manages sub-agents.
-type AgentTool struct {
-	*BaseTool
-	taskManager *tasks.Manager
-	runner      AgentRunner
-}
-
-// AgentRunner executes one isolated sub-agent query.
-type AgentRunner func(context.Context, *tasks.LocalAgentTaskState, *types.ToolContext, func(interface{})) (interface{}, error)
-
-// SetTaskManager sets the task manager for the agent tool.
-func (t *AgentTool) SetTaskManager(mgr *tasks.Manager) {
-	t.taskManager = mgr
-}
-
-// SetRunner configures the query implementation used by spawned agents.
-func (t *AgentTool) SetRunner(runner AgentRunner) {
-	t.runner = runner
-}
-
-// NewAgentTool creates a new Agent tool.
-func NewAgentTool() *AgentTool {
-	return &AgentTool{
-		BaseTool: &BaseTool{
-			name:        constants.ToolAgent,
-			aliases:     []string{"Task"},
-			description: "Spawn a sub-agent to handle complex, multi-step tasks autonomously",
-			inputSchema: types.ToolInputJSONSchema{
-				Type: "object",
-				Properties: map[string]map[string]interface{}{
-					"description": {
-						"type":        "string",
-						"description": "A short (3-5 word) description of the task",
-					},
-					"prompt": {
-						"type":        "string",
-						"description": "The task for the agent to perform",
-					},
-					"subagent_type": {
-						"type":        "string",
-						"description": "The type of specialized agent to use for this task",
-					},
-					"model": {
-						"type":        "string",
-						"enum":        []string{"sonnet", "opus", "haiku"},
-						"description": "Optional model override for this agent",
-					},
-					"run_in_background": {
-						"type":        "boolean",
-						"description": "Set to true to run this agent in the background",
-					},
-				},
-				Required: []string{"description", "prompt"},
-			},
-			isEnabled:  true,
-			isReadOnly: false,
-		},
-	}
-}
-
-// Call spawns a sub-agent.
-func (t *AgentTool) Call(ctx context.Context, args json.RawMessage, toolCtx *types.ToolContext, canUseTool types.CanUseToolFunc, parentMessage *types.Message, onProgress func(progress interface{})) (*types.ToolResult, error) {
-	var input struct {
-		Description     string `json:"description"`
-		Prompt          string `json:"prompt"`
-		SubagentType    string `json:"subagent_type,omitempty"`
-		Model           string `json:"model,omitempty"`
-		RunInBackground bool   `json:"run_in_background,omitempty"`
-	}
-	if err := json.Unmarshal(args, &input); err != nil {
-		return nil, fmt.Errorf("failed to parse input: %w", err)
-	}
-	input.Description = strings.TrimSpace(input.Description)
-	input.Prompt = strings.TrimSpace(input.Prompt)
-	if input.Description == "" || input.Prompt == "" {
-		return nil, fmt.Errorf("description and prompt are required")
-	}
-
-	// Determine agent type
-	agentType := input.SubagentType
-	if agentType == "" {
-		agentType = "general-agent"
-	}
-
-	if t.taskManager == nil || t.runner == nil {
-		return nil, fmt.Errorf("agent runtime is not configured")
-	}
-
-	task, err := t.taskManager.SpawnLocalAgent(ctx, input.Prompt, agentType, input.Description, input.RunInBackground)
-	if err != nil {
-		return nil, fmt.Errorf("failed to spawn agent task: %w", err)
-	}
-	if err := t.taskManager.SetAgentModel(task.ID, input.Model); err != nil {
-		return nil, err
-	}
-	task.Model = input.Model
-	executionCtx := ctx
-	if input.RunInBackground {
-		executionCtx = context.WithoutCancel(ctx)
-	}
-	if err := t.taskManager.StartExecution(executionCtx, task.ID, func(runCtx context.Context, state *tasks.LocalAgentTaskState) (interface{}, error) {
-		return t.runner(runCtx, state, toolCtx, onProgress)
-	}); err != nil {
-		return nil, fmt.Errorf("failed to start agent task: %w", err)
-	}
-
-	toolUseID := ""
-	if toolCtx != nil {
-		toolUseID = toolCtx.ToolUseId
-	}
-	if input.RunInBackground {
-		return &types.ToolResult{
-			Output:    fmt.Sprintf("Agent task '%s' started in background.\nTask ID: %s", input.Description, task.ID),
-			ToolUseID: toolUseID,
-		}, nil
-	}
-
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		current := t.taskManager.GetTask(task.ID)
-		if current == nil {
-			return nil, fmt.Errorf("agent task %s disappeared", task.ID)
-		}
-		state := current.(*tasks.LocalAgentTaskState)
-		switch state.Status {
-		case tasks.TaskStatusCompleted:
-			return &types.ToolResult{Output: state.Result, ToolUseID: toolUseID}, nil
-		case tasks.TaskStatusFailed:
-			return &types.ToolResult{Output: state.Error, Error: fmt.Errorf("agent task failed: %s", state.Error), ToolUseID: toolUseID}, nil
-		case tasks.TaskStatusKilled:
-			return &types.ToolResult{Output: "Agent task was stopped", Error: context.Canceled, ToolUseID: toolUseID}, nil
-		}
-		select {
-		case <-ctx.Done():
-			_ = t.taskManager.KillTask(task.ID)
-			return nil, ctx.Err()
-		case <-ticker.C:
-		}
-	}
-}
-
-// CheckPermissions checks agent permissions.
-func (t *AgentTool) CheckPermissions(ctx context.Context, input json.RawMessage, context *types.ToolContext) (*types.PermissionResult, error) {
-	return &types.PermissionResult{
-		Behavior: types.PermissionBehaviorAllow,
-	}, nil
-}
-
-// UserFacingName returns the user-facing name.
-func (t *AgentTool) UserFacingName(input json.RawMessage) string {
-	var inputData struct {
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(input, &inputData); err == nil && inputData.Description != "" {
-		return inputData.Description
-	}
-	return "Agent"
 }
 
 // =============================================================================

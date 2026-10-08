@@ -1042,13 +1042,12 @@ func (t *MultiEditTool) Call(ctx context.Context, args json.RawMessage, toolCtx 
 
 // Registry manages all available tools.
 type Registry struct {
-	tools          map[string]types.Tool
-	order          []string
-	options        RegistryOptions
-	todoTool       *TodoWriteTool
-	taskCreateTool *TaskCreateTool
-	taskManager    *tasks.Manager
-	agentTool      *AgentTool
+	tools       map[string]types.Tool
+	order       []string
+	options     RegistryOptions
+	todoTool    *TodoWriteTool
+	taskManager *tasks.Manager
+	agentTool   *AgentTool
 }
 
 // RegistryOptions controls which registered tools are exposed to the model.
@@ -1124,16 +1123,10 @@ func NewToolRegistryWithOptions(options RegistryOptions) *Registry {
 	r.Register(todoTool)
 
 	// Register task management tools
-	taskCreateTool := NewTaskCreateTool()
-	r.taskCreateTool = taskCreateTool
-	r.Register(taskCreateTool)
-	r.Register(NewTaskListTool(taskCreateTool, r.taskManager))
-	r.Register(NewTaskStopTool(taskCreateTool, r.taskManager))
-	r.Register(NewTaskGetTool(taskCreateTool, r.taskManager))
-	r.Register(NewTaskUpdateTool(taskCreateTool))
-	taskOutputTool := NewTaskOutputTool()
-	taskOutputTool.SetTaskManager(r.taskManager)
-	r.Register(taskOutputTool)
+	r.Register(NewTaskListTool(r.taskManager))
+	r.Register(NewTaskStopTool(r.taskManager))
+	r.Register(NewTaskGetTool(r.taskManager))
+	r.Register(NewTaskOutputTool(r.taskManager))
 
 	// Register agent tool
 	agentTool := NewAgentTool()

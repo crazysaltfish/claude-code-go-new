@@ -20,12 +20,10 @@ const (
 	ToolWebSearch = "WebSearch"
 
 	// Task tools
-	ToolTaskCreate = "TaskCreate"
 	ToolTaskOutput = "TaskOutput"
 	ToolTaskStop   = "TaskStop"
 	ToolTaskGet    = "TaskGet"
 	ToolTaskList   = "TaskList"
-	ToolTaskUpdate = "TaskUpdate"
 
 	// Agent tools
 	ToolAgent           = "Agent"
@@ -122,10 +120,8 @@ var AsyncAgentAllowedTools = map[string]bool{
 
 // InProcessTeammateAllowedTools are tools allowed only for in-process teammates
 var InProcessTeammateAllowedTools = map[string]bool{
-	ToolTaskCreate:  true,
 	ToolTaskGet:     true,
 	ToolTaskList:    true,
-	ToolTaskUpdate:  true,
 	ToolSendMessage: true,
 	ToolCronCreate:  true,
 	ToolCronDelete:  true,

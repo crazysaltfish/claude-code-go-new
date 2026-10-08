@@ -139,7 +139,7 @@ type Tool interface {
 - `FileReadTool`, `FileWriteTool`, `FileEditTool`: File operations
 - `GlobTool`, `GrepTool`: Search operations
 - `AgentTool`: Sub-agent spawning
-- `TaskCreateTool`, `TaskListTool`, `TaskStopTool`, `TaskGetTool`: Task management
+- `TaskListTool`, `TaskStopTool`, `TaskGetTool`, `TaskOutputTool`: Agent task management
 - `TodoWriteTool`: Todo list
 - `WebFetchTool`, `WebSearchTool`: Web access
 - `MultiEditTool`: Batch edits

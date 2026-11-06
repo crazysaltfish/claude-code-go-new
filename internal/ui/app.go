@@ -176,6 +176,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(cmds...)
 		}
+		if m.chat.ToolDetail != nil && msg.Type != tea.KeyCtrlC {
+			_, cmd := m.chat.Update(msg)
+			return m, cmd
+		}
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			m.cancel()
@@ -208,11 +212,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case QueryEngineMsg:
-		switch data := msg.Data.(type) {
-		case query.SDKMessage:
-			m.handleSDKMessage(data)
-		case query.ResultMessage:
-			m.handleResultMessage(data)
+		m.handleQueryEvent(msg.Data)
+		cmds = append(cmds, m.waitForMessages())
+	case queryBatchMsg:
+		for _, event := range msg.events {
+			m.handleQueryEvent(event)
 		}
 		cmds = append(cmds, m.waitForMessages())
 
@@ -288,6 +292,10 @@ func (m *AppModel) waitForPermissionRequest() tea.Cmd {
 
 func (m *AppModel) startQuery(prompt string) tea.Cmd {
 	trimmed := strings.TrimSpace(prompt)
+	if trimmed == "/tools" {
+		m.chat.OpenToolDetails()
+		return nil
+	}
 	if trimmed == "/diff" {
 		m.chat.ClearError()
 		m.chat.OpenDiffView()
@@ -319,16 +327,8 @@ func (m *AppModel) View() string {
 type QueryEngineMsg struct{ Data interface{} }
 
 func (m *AppModel) waitForMessages() tea.Cmd {
-	return func() tea.Msg {
-		if m.messageChan == nil {
-			return queryCompleteMsg{}
-		}
-		data, ok := <-m.messageChan
-		if !ok {
-			return queryCompleteMsg{}
-		}
-		return QueryEngineMsg{Data: data}
-	}
+	ctx, stream := m.ctx, m.messageChan
+	return func() tea.Msg { return readQueryBatch(ctx, stream) }
 }
 
 func (m *AppModel) handleSDKMessage(msg query.SDKMessage) {

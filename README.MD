@@ -34,3 +34,27 @@ go run ./cmd/cli --provider openai
 - 支持 OpenAI 兼容接口与 Anthropic API。
 - 内置工具权限检查、Bash 安全解析和执行钩子。
 - 支持 MCP、LSP、任务、插件、Vim 模式及对话压缩等能力。
+
+## 会话保存与恢复
+
+提交消息后会自动保存当前项目的会话。用户消息在调用模型前落盘，模型回复和工具调用结果在完成后保存；写入采用原子替换，目录权限为 `0700`、文件权限为 `0600`。每次普通启动使用独立 session ID，恢复时沿用原 ID。
+
+```bash
+# 查看当前项目的历史会话（无需配置 API）
+go run ./cmd/cli sessions
+
+# 恢复指定会话，并显示旧消息；可直接接着输入
+go run ./cmd/cli --resume <session-id>
+
+# 继续当前项目最近更新的会话
+go run ./cmd/cli --continue
+
+# 也支持恢复后以非交互模式继续执行
+go run ./cmd/cli --resume <session-id> -p "继续上次的工作"
+```
+
+交互模式下，`/sessions` 或不带参数的 `/resume` 显示历史列表，`/resume <session-id>` 切换会话。启动恢复默认沿用保存的 provider 和 model，可通过启动参数覆盖；交互内切换会话沿用当前 provider、model 和权限设置。
+
+文件位于 `~/.claude/sessions/<项目绝对路径的哈希>/<session-id>.json`；设置 `CLAUDE_CONFIG_HOME` 或 `XDG_CONFIG_HOME` 时遵循对应配置目录。JSON 中的 `messages` 保存模型继续对话所需的上下文，`history` 保留完整对话和工具记录，执行 `/compact` 不会删除历史。`session_memory` 仍独立用于摘要。
+
+恢复不会重新执行旧工具调用。若中断发生在工具执行期间且尚未保存结果，会将该调用标记为执行状态未知，供模型检查当前状态后继续。旧版本未保存的会话正文无法从摘要还原。尚未完成的流式回复可能只保存到上一条完整消息；正常报错或取消时会尽量保留已收到的文本。

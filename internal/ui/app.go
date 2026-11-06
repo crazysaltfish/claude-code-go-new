@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"claude-code-go/internal/query"
+	"claude-code-go/internal/tasks"
 	"claude-code-go/internal/types"
 	"claude-code-go/internal/ui/components"
 	"claude-code-go/pkg/api"
@@ -39,6 +40,9 @@ const (
 
 // AppModel integrates prompt dispatch and QueryEngine events with Bubble Tea.
 type AppModel struct {
+	taskManager        *tasks.Manager
+	agentTasks         []*tasks.LocalAgentTaskState
+	width, height      int
 	chat               *components.ChatModel
 	ctx                context.Context
 	cancel             context.CancelFunc
@@ -65,7 +69,8 @@ func NewAppModelWithSubmit(submit SubmitFunc, width, height int) *AppModel {
 func NewAppModelWithContext(parent context.Context, submit SubmitFunc, width, height int) *AppModel {
 	ctx, cancel := context.WithCancel(parent)
 	return &AppModel{
-		chat:           components.NewChatModel(width, height),
+		chat:  components.NewChatModel(width, height),
+		width: width, height: height,
 		ctx:            ctx,
 		cancel:         cancel,
 		submit:         submit,
@@ -97,6 +102,9 @@ func (m *AppModel) SetPermissionRequests(requests <-chan PermissionRequest) {
 // Init initializes the app.
 func (m *AppModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.chat.Init()}
+	if m.taskManager != nil {
+		cmds = append(cmds, m.pollAgents())
+	}
 	if m.initialPrompt != "" {
 		prompt := m.initialPrompt
 		cmds = append(cmds, func() tea.Msg { return submitPromptMsg{Prompt: prompt} })
@@ -117,8 +125,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.chat.Width = msg.Width
-		m.chat.Height = msg.Height
+		m.width, m.height = msg.Width, msg.Height
+		msg = m.chatSize()
+		// Pass the reduced dimensions to the chat viewport as well.
+		return m.updateChatSize(msg)
+
+	case agentSnapshotMsg:
+		m.agentTasks = msg.tasks
+		size := m.chatSize()
+		m.chat.Update(size)
+		return m, m.pollAgents()
 
 	case tea.KeyMsg:
 		if m.pendingPermission != nil {
@@ -296,7 +312,7 @@ func (m *AppModel) startQuery(prompt string) tea.Cmd {
 
 // View renders the app.
 func (m *AppModel) View() string {
-	return m.chat.View()
+	return m.viewWithAgents()
 }
 
 // QueryEngineMsg wraps messages from QueryEngine for Bubble Tea.
@@ -317,6 +333,10 @@ func (m *AppModel) waitForMessages() tea.Cmd {
 
 func (m *AppModel) handleSDKMessage(msg query.SDKMessage) {
 	switch msg.Type {
+	case "session_restored":
+		if history, ok := msg.Message.([]types.Message); ok {
+			m.RestoreSession(msg.SessionID, history)
+		}
 	case "assistant_delta":
 		switch delta := msg.Message.(type) {
 		case query.AssistantDelta:

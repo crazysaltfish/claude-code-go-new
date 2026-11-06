@@ -37,6 +37,8 @@ type QueryEngineConfig struct {
 	GetAppState                  func() *types.AppState
 	SetAppState                  func(func(*types.AppState) *types.AppState)
 	InitialMessages              []types.Message
+	InitialHistory               []types.Message
+	PersistSession               func(messages, history []types.Message) error
 	ReadFileCache                types.FileStateCache
 	CustomSystemPrompt           string
 	AppendSystemPrompt           string
@@ -64,6 +66,8 @@ type QueryEngineConfig struct {
 type QueryEngine struct {
 	config             QueryEngineConfig
 	mutableMessages    []types.Message
+	history            []types.Message
+	persistenceDirty   bool
 	abortController    *types.AbortController
 	totalUsage         Usage
 	apiDuration        time.Duration
@@ -142,8 +146,12 @@ func NewQueryEngine(config QueryEngineConfig) *QueryEngine {
 	if absolute, err := filepath.Abs(config.Cwd); err == nil {
 		config.Cwd = filepath.Clean(absolute)
 	}
+	history := config.InitialHistory
+	if history == nil {
+		history = append([]types.Message(nil), config.InitialMessages...)
+	}
 	return &QueryEngine{
-		config:           config,
+		history: history, config: config,
 		mutableMessages:  config.InitialMessages,
 		abortController:  abortController,
 		totalUsage:       Usage{},
@@ -162,14 +170,23 @@ func (e *QueryEngine) SubmitMessage(ctx context.Context, prompt string) (<-chan 
 		defer close(output)
 		e.mu.Lock()
 		defer e.mu.Unlock()
+		defer e.checkpoint(output)
 		e.startTime = time.Now()
 		e.apiDuration = 0
 		e.totalUsage = Usage{}
 
 		// Process user input and get messages
+		e.appendMessages(e.processUserInput(prompt, nil)...)
+		if !e.checkpoint(output) {
+			return
+		}
 		recalledMemories := e.recallMemories(ctx, prompt)
-		userMessages := e.processUserInput(prompt, recalledMemories)
-		e.mutableMessages = append(e.mutableMessages, userMessages...)
+		if len(recalledMemories) > 0 {
+			message := e.processUserInput(prompt, recalledMemories)[0]
+			e.mutableMessages[len(e.mutableMessages)-1] = message
+			e.history[len(e.history)-1] = message
+			e.persistenceDirty = true
+		}
 
 		// Yield user message
 		output <- SDKMessage{
@@ -206,6 +223,9 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 	}
 
 	for turnCount < maxTurns {
+		if !e.checkpoint(output) {
+			return
+		}
 		// Check for abort
 		if e.abortController.IsAborted() {
 			output <- SDKMessage{
@@ -279,6 +299,7 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 				e.emitRecoveryEvent(output, "stream_interrupted", streamInterruptionRecoveries)
 				continue
 			}
+			e.appendRecoverablePartialResponse(response, responseUUID, "stream_interrupted", output)
 			output <- SDKMessage{
 				Type:      "system",
 				Message:   map[string]string{"subtype": "error", "error": err.Error()},
@@ -309,7 +330,10 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 			Role:    "assistant",
 			Content: mustMarshalJSON(response.Content),
 		}
-		e.mutableMessages = append(e.mutableMessages, assistantMsg)
+		e.appendMessages(assistantMsg)
+		if !e.checkpoint(output) {
+			return
+		}
 
 		// Yield assistant message
 		output <- SDKMessage{
@@ -337,11 +361,14 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 
 		// Add tool results to messages
 		for _, result := range toolResults {
-			e.mutableMessages = append(e.mutableMessages, result)
+			e.appendMessages(result)
 		}
 
 	}
 
+	if !e.checkpoint(output) {
+		return
+	}
 	// Max turns reached
 	output <- ResultMessage{
 		Type:          "result",
@@ -551,6 +578,10 @@ func (e *QueryEngine) Compact(ctx context.Context, customInstructions string) (<
 		}}
 		compacted = append(compacted, recent...)
 		e.mutableMessages = compacted
+		e.persistenceDirty = true
+		if !e.checkpoint(output) {
+			return
+		}
 		e.surfacedMemories = make(map[string]struct{})
 		e.memoryRecallBytes = 0
 
@@ -977,7 +1008,7 @@ func (e *QueryEngine) appendRecoverablePartialResponse(
 	safeResponse := *response
 	safeResponse.Content = content
 	safeResponse.StopReason = stopReason
-	e.mutableMessages = append(e.mutableMessages, types.Message{
+	e.appendMessages(types.Message{
 		Role:    "assistant",
 		Content: mustMarshalJSON(content),
 	})
@@ -992,7 +1023,7 @@ func (e *QueryEngine) appendRecoverablePartialResponse(
 }
 
 func (e *QueryEngine) appendRecoveryPrompt(prompt string) {
-	e.mutableMessages = append(e.mutableMessages, types.Message{
+	e.appendMessages(types.Message{
 		Role:    "user",
 		Content: mustMarshalJSON([]map[string]string{{"type": "text", "text": prompt}}),
 	})

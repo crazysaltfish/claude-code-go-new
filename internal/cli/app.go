@@ -16,6 +16,7 @@ import (
 	"claude-code-go/internal/constants"
 	"claude-code-go/internal/memory"
 	"claude-code-go/internal/query"
+	"claude-code-go/internal/sessions"
 	"claude-code-go/internal/state"
 	"claude-code-go/internal/tasks"
 	"claude-code-go/internal/tools"
@@ -28,6 +29,9 @@ import (
 // App represents the CLI application.
 type App struct {
 	config             *Config
+	sessionStore       *sessions.Store
+	session            *sessions.Session
+	queryConfig        query.QueryEngineConfig
 	registry           *commands.Registry
 	toolRegistry       *tools.Registry
 	queryEngine        *query.QueryEngine
@@ -58,6 +62,8 @@ type Config struct {
 	Provider       string
 	APIKey         string
 	BaseURL        string
+	Resume         string
+	Continue       bool
 }
 
 // NewApp creates a new CLI application.
@@ -89,6 +95,15 @@ func (a *App) Initialize() error {
 	a.stateManager = state.NewStateManager()
 	if err := a.stateManager.Initialize(); err != nil {
 		return fmt.Errorf("failed to initialize state: %w", err)
+	}
+	if err := a.initializeSession(); err != nil {
+		return fmt.Errorf("initialize session: %w", err)
+	}
+	if a.config.Model == "" {
+		a.config.Model = a.session.Model
+	}
+	if a.config.Provider == "" {
+		a.config.Provider = a.session.Provider
 	}
 	provider := strings.ToLower(strings.TrimSpace(a.config.Provider))
 	if provider == "" {
@@ -191,10 +206,11 @@ func (a *App) Initialize() error {
 		if toolCtx != nil && toolCtx.Cwd != "" {
 			cwd = toolCtx.Cwd
 		}
+		progress := newAgentProgress(a.toolRegistry.TaskManager(), task.ID)
 		engine := query.NewQueryEngine(query.QueryEngineConfig{
 			Cwd:                cwd,
 			Tools:              a.toolRegistry.FilterToolsForAgent(task.AgentType),
-			CanUseTool:         a.canUseTool,
+			CanUseTool:         progress.permissionCheck(a.canUseTool),
 			APIClient:          a.apiClient,
 			UserSpecifiedModel: model,
 			MaxTokens:          a.config.MaxTokens,
@@ -207,6 +223,7 @@ func (a *App) Initialize() error {
 		}
 		var final string
 		for message := range stream {
+			progress.record(message)
 			if onProgress != nil {
 				onProgress(message)
 			}
@@ -229,15 +246,12 @@ func (a *App) Initialize() error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize memory: %v\n", err)
 	}
 	a.memoryDir = memoryContext.Directory
-	var sessionMemory *memory.SessionMemory
-	if memory.SessionMemoryEnabled() && !a.config.PrintMode {
-		sessionMemory, err = memory.NewSessionMemory(cwd, a.stateManager.GetSessionID(), memory.DefaultSessionMemoryConfig)
-		if err != nil && a.config.Debug {
-			fmt.Fprintf(os.Stderr, "Warning: failed to initialize session memory: %v\n", err)
-		}
-	}
+	sessionMemory := a.sessionMemory(a.session.ID)
 	queryConfig := query.QueryEngineConfig{
-		SessionID:       a.stateManager.GetSessionID(),
+		SessionID:       a.session.ID,
+		InitialMessages: a.session.Messages,
+		InitialHistory:  a.session.History,
+		PersistSession:  a.persistSession,
 		Cwd:             cwd,
 		Tools:           a.toolRegistry.ListEnabled(),
 		MaxTokens:       a.config.MaxTokens,
@@ -265,6 +279,7 @@ func (a *App) Initialize() error {
 		queryConfig.UserSpecifiedModel = a.config.Model
 	}
 
+	a.queryConfig = queryConfig
 	a.queryEngine = query.NewQueryEngine(queryConfig)
 
 	return nil
@@ -318,7 +333,9 @@ func (a *App) runInteractiveMode() error {
 	a.permissionUI = true
 	defer func() { a.permissionUI = false }()
 	model := ui.NewAppModelWithContext(a.ctx, a.submitInteractiveInput, 80, 24)
+	model.SetTaskManager(a.toolRegistry.TaskManager())
 	model.SetInitialPrompt(a.initialPrompt)
+	model.RestoreSession(a.session.ID, a.session.History)
 	model.SetPermissionRequests(a.permissionRequests)
 	model.SetPermissionMode(a.currentPermissionMode(), a.setPermissionMode)
 
@@ -355,6 +372,9 @@ func (a *App) submitInteractiveInput(ctx context.Context, input string) (<-chan 
 	}
 
 	cmdName, args := commands.ParseCommand(input)
+	if cmdName == "sessions" || cmdName == "resume" {
+		return a.executeSessionCommand(ctx, cmdName, args)
+	}
 	cmd, ok := a.registry.Get(cmdName)
 	if !ok {
 		return a.queryEngine.SubmitMessage(ctx, input)
@@ -643,6 +663,8 @@ func (a *App) registerCommands() {
 	a.registry.Register(commands.NewCostCommand())
 	a.registry.Register(commands.NewThemeCommand())
 	a.registry.Register(commands.NewCompactCommand())
+	a.registry.Register(commands.NewResumeCommand())
+	a.registry.Register(commands.NewSessionsCommand())
 	a.registry.Register(commands.NewPermissionCommand())
 	a.registry.RegisterAlias("perm", "permissions")
 }

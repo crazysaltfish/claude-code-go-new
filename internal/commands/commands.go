@@ -592,7 +592,7 @@ func (c *ResumeCommand) IsHidden() bool      { return false }
 func (c *ResumeCommand) Execute(ctx context.Context, args string, context *CommandContext) (*CommandResult, error) {
 	return &CommandResult{
 		Type:  "text",
-		Value: "Listing recent sessions... (not yet implemented)",
+		Value: "Use /resume <id> to restore a saved conversation, or /sessions to list history.",
 	}, nil
 }
 
@@ -731,4 +731,16 @@ func writeFile(path, content string) error {
 
 func workDir() (string, error) {
 	return os.Getwd()
+}
+
+// SessionsCommand lists locally saved conversations.
+type SessionsCommand struct{}
+
+func NewSessionsCommand() *SessionsCommand     { return &SessionsCommand{} }
+func (c *SessionsCommand) Name() string        { return "sessions" }
+func (c *SessionsCommand) Description() string { return "List saved conversations for this project" }
+func (c *SessionsCommand) IsEnabled() bool     { return true }
+func (c *SessionsCommand) IsHidden() bool      { return false }
+func (c *SessionsCommand) Execute(ctx context.Context, args string, context *CommandContext) (*CommandResult, error) {
+	return &CommandResult{Type: "text", Value: "Use /sessions to list saved conversations."}, nil
 }

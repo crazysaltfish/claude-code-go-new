@@ -146,6 +146,7 @@ func (t *AskUserQuestionTool) Call(ctx context.Context, args json.RawMessage, to
 	var input struct {
 		Question    string   `json:"question"`
 		Suggestions []string `json:"suggestions,omitempty"`
+		MultiSelect bool     `json:"multiSelect,omitempty"`
 	}
 	if err := json.Unmarshal(args, &input); err != nil {
 		return nil, fmt.Errorf("failed to parse input: %w", err)

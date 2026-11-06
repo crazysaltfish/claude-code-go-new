@@ -392,11 +392,15 @@ func (t *AgentTool) Call(ctx context.Context, args json.RawMessage, toolCtx *typ
 	}
 	task.Model = input.Model
 	executionCtx := ctx
+	executionProgress := onProgress
 	if input.RunInBackground {
 		executionCtx = context.WithoutCancel(ctx)
+		// The parent query closes its output stream when it finishes. Background
+		// agents outlive that stream, so they must not retain its progress callback.
+		executionProgress = nil
 	}
 	if err := t.taskManager.StartExecution(executionCtx, task.ID, func(runCtx context.Context, state *tasks.LocalAgentTaskState) (interface{}, error) {
-		return t.runner(runCtx, state, toolCtx, onProgress)
+		return t.runner(runCtx, state, toolCtx, executionProgress)
 	}); err != nil {
 		return nil, fmt.Errorf("failed to start agent task: %w", err)
 	}
@@ -705,6 +709,7 @@ func (t *TaskOutputTool) Call(ctx context.Context, args json.RawMessage, toolCtx
 		Block   bool   `json:"block"`
 		Timeout int    `json:"timeout"`
 	}
+	input.Block = true
 	if err := json.Unmarshal(args, &input); err != nil {
 		return nil, fmt.Errorf("failed to parse input: %w", err)
 	}
@@ -725,22 +730,37 @@ func (t *TaskOutputTool) Call(ctx context.Context, args json.RawMessage, toolCtx
 
 		base := task.GetBase()
 		if input.Block && (base.Status == tasks.TaskStatusPending || base.Status == tasks.TaskStatusRunning) {
-			timeout := time.Duration(input.Timeout) * time.Millisecond
-			deadline := time.Now().Add(timeout)
+			waitCtx, cancel := context.WithTimeout(ctx, time.Duration(input.Timeout)*time.Millisecond)
+			defer cancel()
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
 
-			for time.Now().Before(deadline) {
+			for {
+				select {
+				case <-waitCtx.Done():
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+				case <-ticker.C:
+				}
 				task = t.taskManager.GetTask(input.TaskID)
 				if task == nil {
 					return nil, fmt.Errorf("task %s disappeared", input.TaskID)
 				}
 
 				base = task.GetBase()
-				if base.Status != tasks.TaskStatusPending && base.Status != tasks.TaskStatusRunning {
+				if base.Status != tasks.TaskStatusPending && base.Status != tasks.TaskStatusRunning || waitCtx.Err() != nil {
 					break
 				}
-
-				time.Sleep(100 * time.Millisecond)
 			}
+		}
+
+		// Absence of an output file says nothing about task completion. In
+		// particular, local agents only store their result after the runner exits.
+		if base.Status == tasks.TaskStatusPending || base.Status == tasks.TaskStatusRunning || base.Status == tasks.TaskStatusKilled {
+			return &types.ToolResult{
+				Output: fmt.Sprintf("Task %s status: %s (no final output available)", input.TaskID, base.Status),
+			}, nil
 		}
 
 		switch tt := task.(type) {

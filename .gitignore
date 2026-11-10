@@ -1,4 +1,6 @@
 # Default ignored files
+/.idea/
+/.vscode/
 /shelf/
 /workspace.xml
 # Editor-based HTTP Client requests

@@ -13,6 +13,7 @@ import (
 // RestoreSession replays the full transcript into the chat while the engine
 // separately uses the saved (possibly compacted) model context.
 func (m *AppModel) RestoreSession(id string, history []types.Message) {
+	m.sessionID = id
 	size := m.chatSize()
 	m.chat = components.NewChatModel(size.Width, size.Height)
 	m.chat.PermissionMode = string(m.permissionMode)

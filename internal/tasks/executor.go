@@ -16,9 +16,10 @@ import (
 
 // Executor manages task execution lifecycle.
 type Executor struct {
-	registry    *Registry
-	cancelFuncs map[string]context.CancelFunc
-	mu          sync.RWMutex
+	onAgentFinished func(*LocalAgentTaskState)
+	registry        *Registry
+	cancelFuncs     map[string]context.CancelFunc
+	mu              sync.RWMutex
 }
 
 // NewExecutor creates a new task executor.
@@ -63,7 +64,7 @@ func (e *Executor) ExecuteLocalAgent(ctx context.Context, task *LocalAgentTaskSt
 		}()
 
 		result, runErr := handler(execCtx, task)
-		_ = e.registry.Update(task.ID, func(state TaskState) TaskState {
+		err := e.registry.Update(task.ID, func(state TaskState) TaskState {
 			current := state.(*LocalAgentTaskState)
 			if current.Status == TaskStatusKilled {
 				return current
@@ -79,6 +80,9 @@ func (e *Executor) ExecuteLocalAgent(ctx context.Context, task *LocalAgentTaskSt
 			current.EndTime = &now
 			return current
 		})
+		if err == nil && e.onAgentFinished != nil {
+			e.onAgentFinished(task)
+		}
 	}()
 
 	return nil
@@ -239,28 +243,38 @@ type RemoteAgentHandler func(ctx context.Context, task *RemoteAgentTaskState) (i
 
 // Manager provides high-level task management.
 type Manager struct {
-	registry *Registry
-	executor *Executor
-	store    *types.AppStateStore
-	taskChan chan TaskNotification
-	mu       sync.RWMutex
+	registry      *Registry
+	executor      *Executor
+	store         *types.AppStateStore
+	taskChan      chan TaskNotification
+	agentFinished chan struct{}
+	mu            sync.RWMutex
 }
 
 // NewManager creates a new task manager.
 func NewManager(store *types.AppStateStore) *Manager {
 	registry := NewRegistry()
-	return &Manager{
-		registry: registry,
-		executor: NewExecutor(registry),
-		store:    store,
-		taskChan: make(chan TaskNotification, 100),
+	m := &Manager{
+		registry:      registry,
+		executor:      NewExecutor(registry),
+		store:         store,
+		taskChan:      make(chan TaskNotification, 100),
+		agentFinished: make(chan struct{}, 1),
 	}
+	m.executor.onAgentFinished = m.signalAgentFinished
+	return m
 }
 
 // SpawnLocalAgent spawns a new local agent task.
 func (m *Manager) SpawnLocalAgent(ctx context.Context, prompt, agentType, description string, background bool) (*LocalAgentTaskState, error) {
+	return m.SpawnLocalAgentForSession(ctx, "", prompt, agentType, description, background)
+}
+
+// SpawnLocalAgentForSession associates the task with its parent conversation.
+func (m *Manager) SpawnLocalAgentForSession(ctx context.Context, sessionID, prompt, agentType, description string, background bool) (*LocalAgentTaskState, error) {
 	id := generateTaskID()
 	task := CreateLocalAgentTask(id, prompt, agentType, description)
+	task.SessionID = sessionID
 	task.IsBackgrounded = background
 
 	if err := m.registry.Register(task); err != nil {
@@ -385,6 +399,9 @@ func (m *Manager) KillTask(id string) error {
 	})
 
 	m.notifyTaskKilled(task)
+	if agent, ok := task.(*LocalAgentTaskState); ok {
+		m.signalAgentFinished(agent)
+	}
 	return nil
 }
 

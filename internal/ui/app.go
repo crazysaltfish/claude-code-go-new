@@ -40,19 +40,22 @@ const (
 
 // AppModel integrates prompt dispatch and QueryEngine events with Bubble Tea.
 type AppModel struct {
-	taskManager        *tasks.Manager
-	agentTasks         []*tasks.LocalAgentTaskState
-	width, height      int
-	chat               *components.ChatModel
-	ctx                context.Context
-	cancel             context.CancelFunc
-	messageChan        <-chan interface{}
-	submit             SubmitFunc
-	initialPrompt      string
-	permissionRequests <-chan PermissionRequest
-	pendingPermission  *PermissionRequest
-	permissionMode     types.PermissionMode
-	setPermissionMode  func(types.PermissionMode) error
+	taskManager         *tasks.Manager
+	sessionID           string
+	agentFollowups      tasks.AgentFollowups
+	submitAgentFollowup SubmitFunc
+	agentTasks          []*tasks.LocalAgentTaskState
+	width, height       int
+	chat                *components.ChatModel
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	messageChan         <-chan interface{}
+	submit              SubmitFunc
+	initialPrompt       string
+	permissionRequests  <-chan PermissionRequest
+	pendingPermission   *PermissionRequest
+	permissionMode      types.PermissionMode
+	setPermissionMode   func(types.PermissionMode) error
 }
 
 // NewAppModel creates a UI model backed directly by a QueryEngine.
@@ -104,6 +107,9 @@ func (m *AppModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.chat.Init()}
 	if m.taskManager != nil {
 		cmds = append(cmds, m.pollAgents())
+		if m.submitAgentFollowup != nil {
+			cmds = append(cmds, m.waitForAgentFinished())
+		}
 	}
 	if m.initialPrompt != "" {
 		prompt := m.initialPrompt
@@ -129,6 +135,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		msg = m.chatSize()
 		// Pass the reduced dimensions to the chat viewport as well.
 		return m.updateChatSize(msg)
+
+	case agentFinishedMsg:
+		return m, tea.Batch(m.waitForAgentFinished(), m.startAgentFollowup())
 
 	case agentSnapshotMsg:
 		m.agentTasks = msg.tasks
@@ -174,6 +183,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingPermission = nil
 				cmds = append(cmds, m.waitForPermissionRequest())
 			}
+			if m.pendingPermission == nil {
+				cmds = append(cmds, m.startAgentFollowup())
+			}
 			return m, tea.Batch(cmds...)
 		}
 		if m.chat.ToolDetail != nil && msg.Type != tea.KeyCtrlC {
@@ -197,7 +209,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chat.AddSystemMessage("Permission mode: " + string(next))
 			return m, nil
 		case tea.KeyEnter:
-			if m.chat.State == components.ChatStateIdle && m.chat.Input.Value != "" {
+			if m.messageChan == nil && m.chat.State == components.ChatStateIdle && m.chat.Input.Value != "" {
 				prompt := m.chat.Input.Value
 				m.chat.Input.Clear()
 				if cmd := m.startQuery(prompt); cmd != nil {
@@ -221,10 +233,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitForMessages())
 
 	case queryCompleteMsg:
+		m.messageChan = nil
 		m.chat.AbortAssistantMessage()
 		if m.chat.State == components.ChatStateProcessing {
 			m.chat.State = components.ChatStateIdle
 		}
+
+		cmds = append(cmds, m.startAgentFollowup())
 
 	case permissionRequestMsg:
 		m.pendingPermission = &msg.Request
@@ -291,6 +306,9 @@ func (m *AppModel) waitForPermissionRequest() tea.Cmd {
 }
 
 func (m *AppModel) startQuery(prompt string) tea.Cmd {
+	if m.messageChan != nil {
+		return nil
+	}
 	trimmed := strings.TrimSpace(prompt)
 	if trimmed == "/tools" {
 		m.chat.OpenToolDetails()

@@ -383,7 +383,11 @@ func (t *AgentTool) Call(ctx context.Context, args json.RawMessage, toolCtx *typ
 		return nil, fmt.Errorf("agent runtime is not configured")
 	}
 
-	task, err := t.taskManager.SpawnLocalAgent(ctx, input.Prompt, agentType, input.Description, input.RunInBackground)
+	sessionID := ""
+	if toolCtx != nil {
+		sessionID = toolCtx.SessionID
+	}
+	task, err := t.taskManager.SpawnLocalAgentForSession(ctx, sessionID, input.Prompt, agentType, input.Description, input.RunInBackground)
 	if err != nil {
 		return nil, fmt.Errorf("failed to spawn agent task: %w", err)
 	}

@@ -116,6 +116,7 @@ func (t *ProgressTracker) GetProgressUpdate() AgentProgress {
 // LocalAgentTaskState represents a local agent task.
 type LocalAgentTaskState struct {
 	TaskStateBase
+	SessionID              string         `json:"sessionId,omitempty"`
 	AgentID                string         `json:"agentId"`
 	Prompt                 string         `json:"prompt"`
 	AgentType              string         `json:"agentType"`

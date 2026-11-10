@@ -315,17 +315,41 @@ func (a *App) runPrintMode() error {
 		return fmt.Errorf("failed to process prompt: %w", err)
 	}
 
-	// Collect and display results
-	for msg := range output {
-		switch m := msg.(type) {
-		case query.SDKMessage:
-			a.printSDKMessage(m)
-		case query.ResultMessage:
-			a.printResultMessage(m)
+	manager := a.toolRegistry.TaskManager()
+	var followups tasks.AgentFollowups
+	for {
+		for msg := range output {
+			switch m := msg.(type) {
+			case query.SDKMessage:
+				a.printSDKMessage(m)
+			case query.ResultMessage:
+				a.printResultMessage(m)
+			}
+		}
+
+		for {
+			if err := a.ctx.Err(); err != nil {
+				return err
+			}
+			batch := followups.Next(manager, a.queryEngine.GetSessionID())
+			if batch.Prompt != "" {
+				output, err = a.queryEngine.SubmitAgentFollowup(a.ctx, batch.Prompt)
+				if err != nil {
+					return err
+				}
+				followups.Acknowledge(batch)
+				break
+			}
+			if !batch.Active {
+				return nil
+			}
+			select {
+			case <-a.ctx.Done():
+				return a.ctx.Err()
+			case <-manager.AgentFinished():
+			}
 		}
 	}
-
-	return nil
 }
 
 // runInteractiveMode runs the interactive UI.
@@ -334,6 +358,9 @@ func (a *App) runInteractiveMode() error {
 	defer func() { a.permissionUI = false }()
 	model := ui.NewAppModelWithContext(a.ctx, a.submitInteractiveInput, 80, 24)
 	model.SetTaskManager(a.toolRegistry.TaskManager())
+	model.SetAgentFollowupSubmitter(func(ctx context.Context, prompt string) (<-chan interface{}, error) {
+		return a.queryEngine.SubmitAgentFollowup(ctx, prompt)
+	})
 	model.SetInitialPrompt(a.initialPrompt)
 	model.RestoreSession(a.session.ID, a.session.History)
 	model.SetPermissionRequests(a.permissionRequests)

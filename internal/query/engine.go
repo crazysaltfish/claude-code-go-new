@@ -163,6 +163,15 @@ func NewQueryEngine(config QueryEngineConfig) *QueryEngine {
 
 // SubmitMessage submits a message to the query engine and yields responses.
 func (e *QueryEngine) SubmitMessage(ctx context.Context, prompt string) (<-chan interface{}, error) {
+	return e.submitMessage(ctx, prompt, true)
+}
+
+// SubmitAgentFollowup continues the conversation with a response-only turn.
+func (e *QueryEngine) SubmitAgentFollowup(ctx context.Context, prompt string) (<-chan interface{}, error) {
+	return e.submitMessage(ctx, prompt, false)
+}
+
+func (e *QueryEngine) submitMessage(ctx context.Context, prompt string, allowTools bool) (<-chan interface{}, error) {
 	// Create output channel
 	output := make(chan interface{}, 100)
 
@@ -206,14 +215,14 @@ func (e *QueryEngine) SubmitMessage(ctx context.Context, prompt string) (<-chan 
 		}
 
 		// Execute the query loop
-		e.executeQueryLoop(ctx, output)
+		e.executeQueryLoop(ctx, output, allowTools)
 	}()
 
 	return output, nil
 }
 
 // executeQueryLoop runs the main query loop.
-func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interface{}) {
+func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interface{}, allowTools bool) {
 	turnCount := 0
 	maxOutputTokensRecoveries := 0
 	streamInterruptionRecoveries := 0
@@ -257,7 +266,10 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 			MaxTokens: maxTokens,
 			Messages:  e.convertMessagesForAPI(),
 			System:    systemPrompt,
-			Tools:     e.convertToolsForAPI(),
+		}
+
+		if allowTools {
+			req.Tools = e.convertToolsForAPI()
 		}
 
 		// Configure thinking if enabled
@@ -288,6 +300,15 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 		})
 		e.apiDuration += time.Since(apiStarted)
 		if response != nil {
+			if !allowTools {
+				blocks := response.Content[:0]
+				for _, block := range response.Content {
+					if block.Type != "tool_use" {
+						blocks = append(blocks, block)
+					}
+				}
+				response.Content = blocks
+			}
 			e.addUsage(response.Usage)
 		}
 		if err != nil {
@@ -1337,6 +1358,7 @@ func (e *QueryEngine) executeTool(
 	}
 
 	toolCtx := &types.ToolContext{
+		SessionID:       e.sessionID,
 		ToolUseId:       block.ID,
 		Cwd:             e.config.Cwd,
 		AbortController: e.abortController,

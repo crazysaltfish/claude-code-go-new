@@ -23,6 +23,8 @@ var (
 	permissionFlag string
 	maxTokensFlag  int
 	maxTurnsFlag   int
+	resumeFlag     string
+	continueFlag   bool
 )
 
 func main() {
@@ -60,6 +62,11 @@ func init() {
 	rootCmd.Flags().StringVar(&permissionFlag, "permission-mode", "", "Permission mode (default, session, acceptEdits, plan, dontAsk, bypassPermissions)")
 	rootCmd.Flags().IntVar(&maxTokensFlag, "max-tokens", 4096, "Maximum output tokens per API response")
 	rootCmd.Flags().IntVar(&maxTurnsFlag, "max-turns", 100, "Maximum number of conversation turns")
+
+	rootCmd.Flags().StringVarP(&resumeFlag, "resume", "r", "", "Resume a saved session by ID")
+	rootCmd.Flags().BoolVarP(&continueFlag, "continue", "c", false, "Resume the latest session in this project")
+	rootCmd.MarkFlagsMutuallyExclusive("resume", "continue")
+	rootCmd.AddCommand(sessionsCmd)
 
 	// Add subcommands
 	rootCmd.AddCommand(versionCmd)
@@ -107,6 +114,8 @@ func runMain(cmd *cobra.Command, args []string) {
 	// Create app config
 	config := &cli.Config{
 		Debug:          debugFlag,
+		Resume:         resumeFlag,
+		Continue:       continueFlag,
 		Verbose:        verboseFlag,
 		PrintMode:      printModeFlag,
 		Model:          modelFlag,
@@ -148,4 +157,22 @@ func joinArgs(args []string) string {
 		result += arg
 	}
 	return result
+}
+
+var sessionsCmd = &cobra.Command{
+	Use:   "sessions",
+	Short: "List saved conversations for the current project",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		text, err := cli.ListSessions(cwd)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), text)
+		return nil
+	},
 }

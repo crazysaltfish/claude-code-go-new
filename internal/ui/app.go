@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"claude-code-go/internal/query"
+	"claude-code-go/internal/tasks"
 	"claude-code-go/internal/types"
 	"claude-code-go/internal/ui/components"
 	"claude-code-go/pkg/api"
@@ -39,16 +40,22 @@ const (
 
 // AppModel integrates prompt dispatch and QueryEngine events with Bubble Tea.
 type AppModel struct {
-	chat               *components.ChatModel
-	ctx                context.Context
-	cancel             context.CancelFunc
-	messageChan        <-chan interface{}
-	submit             SubmitFunc
-	initialPrompt      string
-	permissionRequests <-chan PermissionRequest
-	pendingPermission  *PermissionRequest
-	permissionMode     types.PermissionMode
-	setPermissionMode  func(types.PermissionMode) error
+	taskManager         *tasks.Manager
+	sessionID           string
+	agentFollowups      tasks.AgentFollowups
+	submitAgentFollowup SubmitFunc
+	agentTasks          []*tasks.LocalAgentTaskState
+	width, height       int
+	chat                *components.ChatModel
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	messageChan         <-chan interface{}
+	submit              SubmitFunc
+	initialPrompt       string
+	permissionRequests  <-chan PermissionRequest
+	pendingPermission   *PermissionRequest
+	permissionMode      types.PermissionMode
+	setPermissionMode   func(types.PermissionMode) error
 }
 
 // NewAppModel creates a UI model backed directly by a QueryEngine.
@@ -65,7 +72,8 @@ func NewAppModelWithSubmit(submit SubmitFunc, width, height int) *AppModel {
 func NewAppModelWithContext(parent context.Context, submit SubmitFunc, width, height int) *AppModel {
 	ctx, cancel := context.WithCancel(parent)
 	return &AppModel{
-		chat:           components.NewChatModel(width, height),
+		chat:  components.NewChatModel(width, height),
+		width: width, height: height,
 		ctx:            ctx,
 		cancel:         cancel,
 		submit:         submit,
@@ -97,6 +105,12 @@ func (m *AppModel) SetPermissionRequests(requests <-chan PermissionRequest) {
 // Init initializes the app.
 func (m *AppModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.chat.Init()}
+	if m.taskManager != nil {
+		cmds = append(cmds, m.pollAgents())
+		if m.submitAgentFollowup != nil {
+			cmds = append(cmds, m.waitForAgentFinished())
+		}
+	}
 	if m.initialPrompt != "" {
 		prompt := m.initialPrompt
 		cmds = append(cmds, func() tea.Msg { return submitPromptMsg{Prompt: prompt} })
@@ -117,8 +131,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.chat.Width = msg.Width
-		m.chat.Height = msg.Height
+		m.width, m.height = msg.Width, msg.Height
+		msg = m.chatSize()
+		// Pass the reduced dimensions to the chat viewport as well.
+		return m.updateChatSize(msg)
+
+	case agentFinishedMsg:
+		return m, tea.Batch(m.waitForAgentFinished(), m.startAgentFollowup())
+
+	case agentSnapshotMsg:
+		m.agentTasks = msg.tasks
+		size := m.chatSize()
+		m.chat.Update(size)
+		return m, m.pollAgents()
 
 	case tea.KeyMsg:
 		if m.pendingPermission != nil {
@@ -158,7 +183,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingPermission = nil
 				cmds = append(cmds, m.waitForPermissionRequest())
 			}
+			if m.pendingPermission == nil {
+				cmds = append(cmds, m.startAgentFollowup())
+			}
 			return m, tea.Batch(cmds...)
+		}
+		if m.chat.ToolDetail != nil && msg.Type != tea.KeyCtrlC {
+			_, cmd := m.chat.Update(msg)
+			return m, cmd
 		}
 		switch msg.Type {
 		case tea.KeyCtrlC:
@@ -177,7 +209,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chat.AddSystemMessage("Permission mode: " + string(next))
 			return m, nil
 		case tea.KeyEnter:
-			if m.chat.State == components.ChatStateIdle && m.chat.Input.Value != "" {
+			if m.messageChan == nil && m.chat.State == components.ChatStateIdle && m.chat.Input.Value != "" {
 				prompt := m.chat.Input.Value
 				m.chat.Input.Clear()
 				if cmd := m.startQuery(prompt); cmd != nil {
@@ -192,19 +224,22 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case QueryEngineMsg:
-		switch data := msg.Data.(type) {
-		case query.SDKMessage:
-			m.handleSDKMessage(data)
-		case query.ResultMessage:
-			m.handleResultMessage(data)
+		m.handleQueryEvent(msg.Data)
+		cmds = append(cmds, m.waitForMessages())
+	case queryBatchMsg:
+		for _, event := range msg.events {
+			m.handleQueryEvent(event)
 		}
 		cmds = append(cmds, m.waitForMessages())
 
 	case queryCompleteMsg:
+		m.messageChan = nil
 		m.chat.AbortAssistantMessage()
 		if m.chat.State == components.ChatStateProcessing {
 			m.chat.State = components.ChatStateIdle
 		}
+
+		cmds = append(cmds, m.startAgentFollowup())
 
 	case permissionRequestMsg:
 		m.pendingPermission = &msg.Request
@@ -271,7 +306,14 @@ func (m *AppModel) waitForPermissionRequest() tea.Cmd {
 }
 
 func (m *AppModel) startQuery(prompt string) tea.Cmd {
+	if m.messageChan != nil {
+		return nil
+	}
 	trimmed := strings.TrimSpace(prompt)
+	if trimmed == "/tools" {
+		m.chat.OpenToolDetails()
+		return nil
+	}
 	if trimmed == "/diff" {
 		m.chat.ClearError()
 		m.chat.OpenDiffView()
@@ -296,27 +338,23 @@ func (m *AppModel) startQuery(prompt string) tea.Cmd {
 
 // View renders the app.
 func (m *AppModel) View() string {
-	return m.chat.View()
+	return m.viewWithAgents()
 }
 
 // QueryEngineMsg wraps messages from QueryEngine for Bubble Tea.
 type QueryEngineMsg struct{ Data interface{} }
 
 func (m *AppModel) waitForMessages() tea.Cmd {
-	return func() tea.Msg {
-		if m.messageChan == nil {
-			return queryCompleteMsg{}
-		}
-		data, ok := <-m.messageChan
-		if !ok {
-			return queryCompleteMsg{}
-		}
-		return QueryEngineMsg{Data: data}
-	}
+	ctx, stream := m.ctx, m.messageChan
+	return func() tea.Msg { return readQueryBatch(ctx, stream) }
 }
 
 func (m *AppModel) handleSDKMessage(msg query.SDKMessage) {
 	switch msg.Type {
+	case "session_restored":
+		if history, ok := msg.Message.([]types.Message); ok {
+			m.RestoreSession(msg.SessionID, history)
+		}
 	case "assistant_delta":
 		switch delta := msg.Message.(type) {
 		case query.AssistantDelta:

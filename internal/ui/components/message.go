@@ -200,7 +200,8 @@ func renderToolCard(block ContentBlock, width int, mode TranscriptMode) string {
 	if summary == "" {
 		summary = toolCallSummary(block)
 	}
-	summary = sanitizeTerminalText(summary)
+	summary, _ = previewSource(summary)
+	summary = compactSummary(sanitizeTerminalText(summary), max(16, width-6))
 	expanded := mode == TranscriptVerbose
 	disclosure := "▸"
 	if expanded {
@@ -209,20 +210,28 @@ func renderToolCard(block ContentBlock, width int, mode TranscriptMode) string {
 	b.WriteString(style.Render(fmt.Sprintf("%s %s %s", icon, disclosure, summary)))
 	if !expanded {
 		if block.IsError && block.Content != nil {
-			b.WriteString("\n" + errorStyle.Render(compactSummary(fmt.Sprintf("%v", block.Content), 120)))
+			b.WriteString("\n" + errorStyle.Render(compactSummary(func() string {
+				text, _ := previewSource(toolContentText(block.Content))
+				return sanitizeTerminalText(text)
+			}(), 120)))
 		}
 		return b.String()
 	}
 
 	if len(block.Input) > 0 {
 		b.WriteString("\n\n" + systemStyle.Render("Input"))
-		b.WriteString("\n" + renderToolInput(block.Input, width-2))
+		b.WriteString("\n" + toolPreview(string(block.Input), width-2, func(text string, w int) string { return renderToolInput(json.RawMessage(text), w) }))
 	}
 	diff := block.Diff
-	if diff == "" {
+	if diff == "" && len(block.Input) <= toolPreviewBytes {
+		// Generated diffs can at most contain the already bounded input.
 		diff = renderToolDiff(block, width-2)
-	} else {
-		diff = renderDiffOutput(diff, width-2)
+		lines := strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
+		if len(lines) > toolPreviewLines {
+			diff = strings.Join(lines[:toolPreviewLines], "\n") + "\n… Ctrl+T: full tool details"
+		}
+	} else if diff != "" {
+		diff = toolPreview(diff, width-2, renderDiffOutput)
 	}
 	if diff != "" {
 		b.WriteString("\n\n" + systemStyle.Render("Changes"))
@@ -230,7 +239,7 @@ func renderToolCard(block ContentBlock, width int, mode TranscriptMode) string {
 	}
 	if block.Content != nil {
 		b.WriteString("\n\n" + systemStyle.Render("Output"))
-		b.WriteString("\n" + renderTextOutput(fmt.Sprintf("%v", block.Content), width-2))
+		b.WriteString("\n" + toolPreview(toolContentText(block.Content), width-2, renderTextOutput))
 	}
 	if block.Truncated {
 		b.WriteString("\n" + truncationStyle.Render(fmt.Sprintf("Output truncated from %d characters", block.OriginalChars)))
@@ -251,6 +260,9 @@ func renderToolInput(input json.RawMessage, width int) string {
 }
 
 func toolCallSummary(block ContentBlock) string {
+	if len(block.Input) > toolPreviewBytes {
+		return block.Name + " (large input; Ctrl+T: details)"
+	}
 	var input map[string]interface{}
 	_ = json.Unmarshal(block.Input, &input)
 	switch block.Name {
@@ -364,7 +376,7 @@ func renderToolProgress(block ContentBlock, width int) string {
 	if block.Name != "" {
 		label = "Running " + block.Name
 	}
-	return toolUseStyle.Render("↻ "+label) + "\n" + wrapText(fmt.Sprintf("%v", block.Content), width-2)
+	return toolUseStyle.Render("↻ "+label) + "\n" + toolPreview(toolContentText(block.Content), width-2, renderTextOutput)
 }
 
 // renderToolUse renders a tool use block.
@@ -376,7 +388,7 @@ func renderToolUse(block ContentBlock, width int) string {
 
 	// Input preview (truncated if too long)
 	if len(block.Input) > 0 {
-		inputPreview := string(block.Input)
+		inputPreview, _ := previewSource(string(block.Input))
 		if runewidth.StringWidth(inputPreview) > 200 {
 			inputPreview = runewidth.Truncate(inputPreview, 200, "...")
 		}
@@ -401,7 +413,7 @@ func renderToolResult(block ContentBlock, width int) string {
 	b.WriteString(style.Render(icon+" Tool Result") + "\n")
 
 	// Content preview
-	contentStr := fmt.Sprintf("%v", block.Content)
+	contentStr, _ := previewSource(toolContentText(block.Content))
 	if runewidth.StringWidth(contentStr) > 500 {
 		contentStr = runewidth.Truncate(contentStr, 500, "") + "\n... (truncated)"
 	}
@@ -432,7 +444,26 @@ func wrapText(text string, width int) string {
 	if width <= 0 {
 		return text
 	}
-	return runewidth.Wrap(text, width)
+	// go-runewidth.Wrap repeatedly concatenates strings for every rune. A
+	// builder preserves its wrapping behavior with linear allocation/work.
+	var b strings.Builder
+	b.Grow(len(text))
+	column := 0
+	for _, r := range text {
+		if r == '\n' {
+			b.WriteRune(r)
+			column = 0
+			continue
+		}
+		cells := runewidth.RuneWidth(r)
+		if column+cells > width {
+			b.WriteByte('\n')
+			column = 0
+		}
+		b.WriteRune(r)
+		column += cells
+	}
+	return b.String()
 }
 
 // =============================================================================
@@ -447,6 +478,13 @@ type MessageListModel struct {
 	Width        int
 	Height       int
 	Mode         TranscriptMode
+	lineHeights  map[int]int
+	cacheClock   uint64
+	toolIndex    map[string]toolBlockLocation
+	toolIndexed  int
+	renderCache  map[int]cachedTranscriptMessage
+	cacheWidth   int
+	cacheMode    TranscriptMode
 }
 
 // NewMessageList creates a new message list.
@@ -502,6 +540,7 @@ func (m *MessageListModel) UpsertToolProgress(toolName, toolUseID, content strin
 			message.Content[0].ToolUseID != toolUseID {
 			continue
 		}
+		m.invalidateMessage(i)
 		message.Content[0].Name = toolName
 		message.Content[0].Content = content
 		return
@@ -545,15 +584,7 @@ func (m *MessageListModel) CompleteToolUse(toolName, toolUseID, content string, 
 }
 
 func (m *MessageListModel) findToolBlock(toolUseID string) *ContentBlock {
-	for i := len(m.Messages) - 1; i >= 0; i-- {
-		for j := range m.Messages[i].Content {
-			block := &m.Messages[i].Content[j]
-			if block.Type == "tool" && block.ToolUseID == toolUseID {
-				return block
-			}
-		}
-	}
-	return nil
+	return m.indexedTool(toolUseID)
 }
 
 // CycleTranscriptMode rotates Normal → Verbose → Summary.
@@ -613,6 +644,7 @@ func (m *MessageListModel) RemoveToolProgress(toolUseID string) {
 			message.Content[0].ToolUseID != toolUseID {
 			continue
 		}
+		m.invalidateFrom(i)
 		m.Messages = append(m.Messages[:i], m.Messages[i+1:]...)
 		return
 	}
@@ -634,6 +666,7 @@ func (m *MessageListModel) AppendAssistantDelta(text string) {
 			IsStreaming: true,
 		})
 	}
+	m.invalidateMessage(len(m.Messages) - 1)
 	message := &m.Messages[len(m.Messages)-1]
 	if len(message.Content) == 0 || message.Content[len(message.Content)-1].Type != "text" {
 		message.Content = append(message.Content, ContentBlock{Type: "text"})
@@ -648,6 +681,7 @@ func (m *MessageListModel) FinalizeAssistantStream(content string) {
 	restoreScroll := m.preserveScrollAnchor()
 	defer restoreScroll()
 	if len(m.Messages) > 0 {
+		m.invalidateMessage(len(m.Messages) - 1)
 		message := &m.Messages[len(m.Messages)-1]
 		if message.Role == "assistant" && message.IsStreaming {
 			if content != "" {
@@ -671,6 +705,7 @@ func (m *MessageListModel) AbortAssistantStream() {
 	if len(m.Messages) == 0 {
 		return
 	}
+	m.invalidateMessage(len(m.Messages) - 1)
 	message := &m.Messages[len(m.Messages)-1]
 	if message.Role == "assistant" {
 		message.IsStreaming = false
@@ -688,10 +723,7 @@ func (m *MessageListModel) HasStreamingAssistant() bool {
 
 // ScrollUp scrolls the rendered conversation up by one line.
 func (m *MessageListModel) ScrollUp() {
-	maxOffset := m.maxScrollOffset()
-	if m.ScrollOffset < maxOffset {
-		m.ScrollOffset++
-	}
+	m.ScrollOffset = m.clampOffset(m.ScrollOffset + 1)
 }
 
 // ScrollDown scrolls the rendered conversation down by one line.
@@ -708,10 +740,7 @@ func (m *MessageListModel) PageUp() {
 		step = 1
 	}
 	m.ScrollOffset += step
-	maxOffset := m.maxScrollOffset()
-	if m.ScrollOffset > maxOffset {
-		m.ScrollOffset = maxOffset
-	}
+	m.ScrollOffset = m.clampOffset(m.ScrollOffset)
 }
 
 // PageDown scrolls downward by one viewport.
@@ -733,25 +762,9 @@ func (m *MessageListModel) IsScrolled() bool {
 
 // View renders the message list as a fixed-height, line-based viewport.
 func (m *MessageListModel) View() string {
-	height := m.MaxVisible
-	if height < 1 {
-		height = 1
-	}
-	lines := m.renderedLines()
-	maxOffset := len(lines) - height
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
-	if m.ScrollOffset > maxOffset {
-		m.ScrollOffset = maxOffset
-	}
-
-	end := len(lines) - m.ScrollOffset
-	start := end - height
-	if start < 0 {
-		start = 0
-	}
-	visible := append([]string(nil), lines[start:end]...)
+	height := max(1, m.MaxVisible)
+	m.ScrollOffset = m.clampOffset(m.ScrollOffset)
+	visible := m.viewportLines(m.ScrollOffset, height)
 	for len(visible) < height {
 		visible = append(visible, "")
 	}
@@ -759,19 +772,7 @@ func (m *MessageListModel) View() string {
 }
 
 func (m *MessageListModel) renderedLines() []string {
-	if len(m.Messages) == 0 {
-		return nil
-	}
-	var b strings.Builder
-	for index, msg := range m.Messages {
-		if !m.messageVisible(index, msg) {
-			continue
-		}
-		b.WriteString(renderMessageWithMode(msg, m.Width, m.Mode))
-		b.WriteString("\n")
-	}
-	rendered := strings.TrimSuffix(b.String(), "\n")
-	return strings.Split(rendered, "\n")
+	return m.tailLines(int(^uint(0) >> 1))
 }
 
 func (m *MessageListModel) messageVisible(index int, message MessageModel) bool {
@@ -824,11 +825,11 @@ func (m *MessageListModel) DiffEntries() []DiffEntry {
 }
 
 func (m *MessageListModel) maxScrollOffset() int {
-	maxOffset := len(m.renderedLines()) - m.MaxVisible
-	if maxOffset < 0 {
-		return 0
+	total := 0
+	for i := range m.Messages {
+		total += m.messageHeight(i)
 	}
-	return maxOffset
+	return max(0, total-max(1, m.MaxVisible))
 }
 
 // preserveScrollAnchor keeps the same transcript lines visible while live
@@ -838,14 +839,26 @@ func (m *MessageListModel) preserveScrollAnchor() func() {
 	if m.ScrollOffset == 0 {
 		return func() {}
 	}
-	visibleEnd := len(m.renderedLines()) - m.ScrollOffset
+	// Anchor the viewport end to a message and an offset within that message.
+	remaining := m.ScrollOffset
+	anchor := -1
+	for i := len(m.Messages) - 1; i >= 0; i-- {
+		size := m.messageHeight(i)
+		if remaining <= size && size > 0 {
+			anchor = i
+			break
+		}
+		remaining -= size
+	}
+	if anchor < 0 {
+		return func() { m.ScrollOffset = m.clampOffset(m.ScrollOffset) }
+	}
+	anchorEnd := m.messageHeight(anchor) - remaining
 	return func() {
-		m.ScrollOffset = len(m.renderedLines()) - visibleEnd
-		if m.ScrollOffset < 0 {
-			m.ScrollOffset = 0
+		offset := max(0, m.messageHeight(anchor)-anchorEnd)
+		for i := anchor + 1; i < len(m.Messages); i++ {
+			offset += m.messageHeight(i)
 		}
-		if maxOffset := m.maxScrollOffset(); m.ScrollOffset > maxOffset {
-			m.ScrollOffset = maxOffset
-		}
+		m.ScrollOffset = m.clampOffset(offset)
 	}
 }

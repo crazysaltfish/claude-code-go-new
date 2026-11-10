@@ -31,6 +31,7 @@ type ToolDisplay struct {
 
 // ToolContext provides context for tool execution.
 type ToolContext struct {
+	SessionID       string
 	Options         ToolOptions
 	Cwd             string
 	AbortController *AbortController

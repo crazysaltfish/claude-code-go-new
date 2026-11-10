@@ -252,7 +252,7 @@ When the user asks you to create a pull request:
 Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
 
 Usage:
-- The file_path parameter must be an absolute path, not a relative path
+- The target_file parameter must be an absolute path, not a relative path
 - By default, it reads up to 2000 lines starting from the beginning of the file
 - You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
 - Results are returned using cat -n format, with line numbers starting at 1
@@ -315,25 +315,22 @@ Critical Requirements:
 
 Usage:
 - Works fast with codebases of any size
-- Returns matching file paths sorted by modification time
+- Returns matching file paths, or reports that no files were found
 - Use when you need to find files by name patterns
 
 Parameters:
 - pattern: The glob pattern to match files against
-  (Patterns not starting with "**/" are automatically prepended with "**/")
-- target_directory: Optional directory to search in (defaults to workspace root)
+  (A "**" segment matches zero or more path segments. Other patterns are automatically prefixed with "**/" unless they already start with it.)
+- target_directory: Optional directory or single file to search (defaults to workspace root)
 
 Pattern Examples:
 - "*.js" → finds all .js files (becomes "**/*.js")
-- "**/node_modules/**" → finds all node_modules directories
+- "**/node_modules/**" → finds files under node_modules directories
 - "**/test/**/test_*.ts" → finds test_*.ts files in any test directory
 
 Guidelines:
-- Always provide ONE directory or file path; [] searches whole repo
-- No globs or wildcards for target_directory parameter
-- Bad: ["frontend/", "backend/"] (multiple paths)
-- Bad: ["src/**/utils/**"] (globs)
-- Bad: ["*.ts"] or ["**/*"] (wildcard paths)`
+- Provide one literal path for target_directory or omit it to search the workspace
+- Put wildcards in pattern`
 
 	DescGrep = `A powerful search tool built on ripgrep.
 
@@ -627,7 +624,7 @@ func GetGlobToolSchema() map[string]interface{} {
 			},
 			"target_directory": map[string]interface{}{
 				"type":        "string",
-				"description": "The directory to search in",
+				"description": "The directory or single file to search (defaults to workspace root)",
 			},
 		},
 		"required": []string{"pattern"},

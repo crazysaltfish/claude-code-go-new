@@ -73,6 +73,7 @@ type ChatModel struct {
 	ApprovalText   string
 	ApprovalOffset int
 	DiffView       *DiffViewModel
+	ToolDetail     *ToolDetailModel
 	runStartIndex  int
 	PermissionMode string
 }
@@ -101,6 +102,20 @@ func (m *ChatModel) Init() tea.Cmd {
 // Update handles chat interface updates.
 func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	if m.ToolDetail != nil {
+		if key, ok := msg.(tea.KeyMsg); ok && key.Type == tea.KeyCtrlC {
+			return m, tea.Quit
+		}
+		if size, ok := msg.(tea.WindowSizeMsg); ok {
+			m.Width, m.Height = size.Width, size.Height
+		}
+		if m.ToolDetail.Update(msg) {
+			m.ToolDetail = nil
+			_, cmd := m.Update(tea.WindowSizeMsg{Width: m.Width, Height: m.Height})
+			return m, cmd
+		}
+		return m, nil
+	}
 	if m.DiffView != nil {
 		switch msg := msg.(type) {
 		case tea.WindowSizeMsg:
@@ -156,6 +171,8 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case tea.KeyCtrlH:
 			m.HelpVisible = !m.HelpVisible
+		case tea.KeyCtrlT:
+			m.OpenToolDetails()
 		case tea.KeyCtrlO:
 			m.Messages.CycleTranscriptMode()
 		case tea.KeyPgUp:
@@ -205,6 +222,9 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the chat interface.
 func (m *ChatModel) View() string {
+	if m.ToolDetail != nil {
+		return m.ToolDetail.View()
+	}
 	if m.DiffView != nil {
 		return m.DiffView.View()
 	}
@@ -247,7 +267,7 @@ func (m *ChatModel) View() string {
 	b.WriteString(m.Input.View() + "\n")
 
 	// Footer with help
-	footerText := "Enter: send | Ctrl+O: transcript view | /diff: changes | Ctrl+C: quit"
+	footerText := "Enter: send | Ctrl+O: transcript | Ctrl+T: tools | /diff: changes | Ctrl+C: quit"
 	if m.ApprovalText != "" {
 		footerText = "↑↓: inspect | y: allow once | a: allow session | n/Esc: deny"
 	} else if m.Messages.IsScrolled() {
@@ -362,6 +382,8 @@ func (m *ChatModel) AddToolResult(toolName, toolUseID, content string, isError, 
 
 // SetApproval displays a tool approval panel.
 func (m *ChatModel) SetApproval(content string) {
+	// Approval must remain visible even when a read-only detail overlay is open.
+	m.ToolDetail = nil
 	m.ApprovalText = content
 	m.ApprovalOffset = 0
 	m.updateMessageViewport()
@@ -559,4 +581,9 @@ func (r *StreamingResponse) Fail(err error) {
 // String returns the current content.
 func (r *StreamingResponse) String() string {
 	return r.Content.String()
+}
+
+// OpenToolDetails leaves transcript scroll and prompt input untouched.
+func (m *ChatModel) OpenToolDetails() {
+	m.ToolDetail = NewToolDetail(m.Messages.ToolEntries(), m.Width, m.Height)
 }

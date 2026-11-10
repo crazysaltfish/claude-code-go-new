@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -589,37 +591,84 @@ func (t *GlobTool) Call(ctx context.Context, args json.RawMessage, toolCtx *type
 		searchDir = "."
 	}
 
-	// Prepend **/ if pattern doesn't start with it
-	pattern := input.Pattern
-	if !strings.HasPrefix(pattern, "**/") {
+	result := &types.ToolResult{ToolUseID: toolCtx.ToolUseId}
+	if input.Pattern == "" {
+		result.Error = fmt.Errorf("glob pattern is required")
+		return result, nil
+	}
+	pattern := filepath.ToSlash(input.Pattern)
+	if pattern != "**" && !strings.HasPrefix(pattern, "**/") {
 		pattern = "**/" + pattern
 	}
+	segments := strings.Split(pattern, "/")
+	for _, segment := range segments {
+		if _, err := path.Match(segment, ""); err != nil {
+			result.Error = fmt.Errorf("invalid glob pattern %q: %w", input.Pattern, err)
+			return result, nil
+		}
+	}
 
-	// Use filepath.Glob with the pattern
 	var matches []string
-	err := filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(searchDir, func(file string, entry fs.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() {
 			return nil
 		}
-		if !info.IsDir() {
-			matched, _ := filepath.Match(pattern, path)
-			if matched {
-				matches = append(matches, path)
-			}
+		relative, err := filepath.Rel(searchDir, file)
+		if err != nil {
+			return err
+		}
+		if relative == "." {
+			relative = entry.Name() // The search target is a single file.
+		}
+		if matchGlobSegments(segments, strings.Split(filepath.ToSlash(relative), "/")) {
+			matches = append(matches, file)
 		}
 		return nil
 	})
-	if err != nil {
-		return &types.ToolResult{
-			Error:     fmt.Errorf("glob failed: %w", err),
-			ToolUseID: toolCtx.ToolUseId,
-		}, nil
+	switch {
+	case err != nil:
+		result.Error = fmt.Errorf("glob failed: %w", err)
+	case len(matches) == 0:
+		result.Output = "No files found"
+	default:
+		result.Output = strings.Join(matches, "\n")
 	}
+	return result, nil
+}
 
-	return &types.ToolResult{
-		Output:    strings.Join(matches, "\n"),
-		ToolUseID: toolCtx.ToolUseId,
-	}, nil
+func matchGlobSegments(pattern, file []string) bool {
+	patternIndex, fileIndex := 0, 0
+	starIndex, starEnd := -1, 0
+	for fileIndex < len(file) {
+		if patternIndex < len(pattern) {
+			if pattern[patternIndex] == "**" {
+				// Try zero segments first. Retry by extending the last ** on mismatch.
+				starIndex, starEnd = patternIndex, fileIndex
+				patternIndex++
+				continue
+			}
+			if matched, _ := path.Match(pattern[patternIndex], file[fileIndex]); matched {
+				patternIndex++
+				fileIndex++
+				continue
+			}
+		}
+		if starIndex == -1 {
+			return false
+		}
+		starEnd++
+		patternIndex, fileIndex = starIndex+1, starEnd
+	}
+	for patternIndex < len(pattern) && pattern[patternIndex] == "**" {
+		patternIndex++
+	}
+	return patternIndex == len(pattern)
 }
 
 // =============================================================================

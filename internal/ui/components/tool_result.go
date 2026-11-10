@@ -206,7 +206,7 @@ func (s *ToolUseSummary) Render() string {
 	toolName := sanitizeTerminalText(s.ToolName)
 	switch s.ToolName {
 	case "Read":
-		file, _ := s.Input["target_file"].(string)
+		file := firstString(s.Input, "file_path", "target_file")
 		return fmt.Sprintf("📖 Read: %s", filepath.Base(sanitizeTerminalText(file)))
 	case "Write", "Edit":
 		file, _ := s.Input["file_path"].(string)

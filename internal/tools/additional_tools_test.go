@@ -43,7 +43,7 @@ func TestToolSearchBM25RanksRelevantToolFirst(t *testing.T) {
 	registry.Register(newBM25FixtureTool(
 		"FileRead",
 		"Read contents from a local file",
-		map[string]string{"target_file": "Path of the file to read"},
+		map[string]string{"file_path": "Path of the file to read"},
 	))
 	registry.Register(newBM25FixtureTool(
 		"TextSearch",

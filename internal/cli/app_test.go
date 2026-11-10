@@ -21,13 +21,13 @@ func TestDefaultModeRequiresApprovalForEveryTool(t *testing.T) {
 		permissionUI: false,
 	}
 
-	inside, _ := json.Marshal(map[string]string{"target_file": filepath.Join(workspace, "source.go")})
+	inside, _ := json.Marshal(map[string]string{"file_path": filepath.Join(workspace, "source.go")})
 	decision, err := app.canUseTool(context.Background(), "Read", inside)
 	if err != nil || decision.Behavior != types.PermissionBehaviorDeny {
 		t.Fatalf("inside read decision = %#v, err=%v; want approval requirement", decision, err)
 	}
 
-	outside, _ := json.Marshal(map[string]string{"target_file": filepath.Join(t.TempDir(), "credentials")})
+	outside, _ := json.Marshal(map[string]string{"file_path": filepath.Join(t.TempDir(), "credentials")})
 	decision, err = app.canUseTool(context.Background(), "Read", outside)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestInteractiveApprovalAllowsOnceWithoutChangingMode(t *testing.T) {
 		permissionUI:       true,
 		permissionRequests: make(chan ui.PermissionRequest),
 	}
-	input, _ := json.Marshal(map[string]string{"target_file": filepath.Join(workspace, "source.go")})
+	input, _ := json.Marshal(map[string]string{"file_path": filepath.Join(workspace, "source.go")})
 	type result struct {
 		decision *types.PermissionDecision
 		err      error

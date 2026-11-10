@@ -66,7 +66,7 @@ func (p *agentProgress) record(message interface{}) {
 			}
 			activity := tasks.ToolActivity{ToolName: block.Name}
 			_ = json.Unmarshal(block.Input, &activity.Input)
-			for _, key := range []string{"description", "file_path", "path", "command", "pattern", "query"} {
+			for _, key := range []string{"description", "file_path", "target_file", "path", "command", "pattern", "query"} {
 				if value, ok := activity.Input[key].(string); ok && value != "" {
 					activity.ActivityDescription = value
 					break

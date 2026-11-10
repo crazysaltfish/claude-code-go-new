@@ -252,7 +252,7 @@ When the user asks you to create a pull request:
 Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
 
 Usage:
-- The target_file parameter must be an absolute path, not a relative path
+- The file_path parameter must be an absolute path, not a relative path
 - By default, it reads up to 2000 lines starting from the beginning of the file
 - You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
 - Results are returned using cat -n format, with line numbers starting at 1
@@ -264,7 +264,7 @@ Usage:
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
 
 Parameters:
-- target_file: The file path to read (must be an absolute path)
+- file_path: The file path to read (must be an absolute path)
 - offset: Optional line number to start reading from
 - limit: Optional number of lines to read (max 2000)
 - pages: Optional page range for PDF files (e.g., "1-5", "1,3,5")`
@@ -548,7 +548,7 @@ func GetReadToolSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"target_file": map[string]interface{}{
+			"file_path": map[string]interface{}{
 				"type":        "string",
 				"description": "The absolute path of the file to read",
 			},
@@ -565,7 +565,7 @@ func GetReadToolSchema() map[string]interface{} {
 				"description": "Page range for PDF files (e.g., \"1-5\", \"1,3,5\")",
 			},
 		},
-		"required": []string{"target_file"},
+		"required": []string{"file_path"},
 	}
 }
 

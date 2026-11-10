@@ -263,16 +263,16 @@ func NewFileReadTool() *FileReadTool {
 // Call reads the file content.
 func (t *FileReadTool) Call(ctx context.Context, args json.RawMessage, toolCtx *types.ToolContext, canUseTool types.CanUseToolFunc, parentMessage *types.Message, onProgress func(progress interface{})) (*types.ToolResult, error) {
 	var input struct {
-		TargetFile string `json:"target_file"`
-		Offset     int    `json:"offset,omitempty"`
-		Limit      int    `json:"limit,omitempty"`
+		FilePath string `json:"file_path"`
+		Offset   int    `json:"offset,omitempty"`
+		Limit    int    `json:"limit,omitempty"`
 	}
 	if err := json.Unmarshal(args, &input); err != nil {
 		return nil, fmt.Errorf("failed to parse input: %w", err)
 	}
 
 	// Check file size
-	info, err := os.Stat(input.TargetFile)
+	info, err := os.Stat(input.FilePath)
 	if err != nil {
 		return &types.ToolResult{
 			Error:     fmt.Errorf("failed to stat file: %w", err),
@@ -288,7 +288,7 @@ func (t *FileReadTool) Call(ctx context.Context, args json.RawMessage, toolCtx *
 	}
 
 	// Read file
-	content, err := os.ReadFile(input.TargetFile)
+	content, err := os.ReadFile(input.FilePath)
 	if err != nil {
 		return &types.ToolResult{
 			Error:     fmt.Errorf("failed to read file: %w", err),

@@ -267,7 +267,7 @@ func toolCallSummary(block ContentBlock) string {
 	_ = json.Unmarshal(block.Input, &input)
 	switch block.Name {
 	case "Read":
-		return "Read " + firstString(input, "target_file", "file_path")
+		return "Read " + firstString(input, "file_path", "target_file")
 	case "Write", "Edit", "MultiEdit":
 		path := firstString(input, "file_path", "target_file")
 		added, removed := toolDiffStats(block.Name, input)

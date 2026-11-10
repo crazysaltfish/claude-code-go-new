@@ -124,10 +124,27 @@ func inputPathFields(input json.RawMessage, fields ...string) []string {
 }
 
 func (t *FileReadTool) NormalizeInput(input json.RawMessage, cwd string) (json.RawMessage, error) {
-	return normalizePathFields(input, cwd, map[string]bool{"target_file": false})
+	// Accept the old key at the query boundary. Schema validation, permissions
+	// and execution all see the same canonical file_path.
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(input, &object); err != nil {
+		return nil, err
+	}
+	if legacy, ok := object["target_file"]; ok {
+		if _, exists := object["file_path"]; !exists {
+			object["file_path"] = legacy
+		}
+		delete(object, "target_file")
+		var err error
+		input, err = json.Marshal(object)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return normalizePathFields(input, cwd, map[string]bool{"file_path": false})
 }
 func (t *FileReadTool) InputPaths(input json.RawMessage) []string {
-	return inputPathFields(input, "target_file")
+	return inputPathFields(input, "file_path")
 }
 
 func (t *FileWriteTool) NormalizeInput(input json.RawMessage, cwd string) (json.RawMessage, error) {

@@ -153,7 +153,7 @@ func TestQueryEngineToolRoundTrip(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		if calls.Add(1) == 1 {
-			arguments, err := json.Marshal(map[string]string{"target_file": target})
+			arguments, err := json.Marshal(map[string]string{"file_path": target})
 			if err != nil {
 				t.Error(err)
 				return
@@ -250,7 +250,7 @@ func TestQueryEngineOpenAIToolRoundTrip(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		if calls.Add(1) == 1 {
-			arguments, err := json.Marshal(map[string]string{"target_file": target})
+			arguments, err := json.Marshal(map[string]string{"file_path": target})
 			if err != nil {
 				t.Error(err)
 				http.Error(w, "failed to encode arguments", http.StatusInternalServerError)
@@ -559,24 +559,31 @@ func TestPathNormalizationRunsBeforePermissionAndExecution(t *testing.T) {
 			if err := json.Unmarshal(input, &value); err != nil {
 				t.Fatal(err)
 			}
-			approvedPath = value["target_file"]
+			approvedPath = value["file_path"]
 			return &types.PermissionDecision{Behavior: types.PermissionBehaviorAllow}, nil
 		},
 	})
-	outcome := engine.executeTool(context.Background(), api.ContentBlock{
-		Type: "tool_use", ID: "read", Name: "Read", Input: json.RawMessage(`{"target_file":"input.txt"}`),
-	}, nil)
 	canonicalWorkspace, err := tools.CanonicalizePath(workspace, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := filepath.Join(canonicalWorkspace, "input.txt")
-	if approvedPath != want {
-		t.Fatalf("permission saw path %q, want canonical %q", approvedPath, want)
-	}
-	data := outcome.sdkMessage.Message.(map[string]interface{})
-	if data["is_error"] == true || !strings.Contains(data["content"].(string), "safe") {
-		t.Fatalf("normalized execution failed: %#v", data)
+	for _, input := range []string{
+		`{"file_path":"input.txt"}`,
+		`{"target_file":"input.txt"}`,
+		`{"file_path":"input.txt","target_file":"different.txt"}`,
+	} {
+		approvedPath = ""
+		outcome := engine.executeTool(context.Background(), api.ContentBlock{
+			Type: "tool_use", ID: "read", Name: "Read", Input: json.RawMessage(input),
+		}, nil)
+		if approvedPath != want {
+			t.Fatalf("%s: permission saw path %q, want canonical %q", input, approvedPath, want)
+		}
+		data := outcome.sdkMessage.Message.(map[string]interface{})
+		if data["is_error"] == true || !strings.Contains(data["content"].(string), "safe") {
+			t.Fatalf("%s: normalized execution failed: %#v", input, data)
+		}
 	}
 }
 

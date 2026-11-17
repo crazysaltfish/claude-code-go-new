@@ -46,7 +46,7 @@ func (m *AppModel) chatSize() tea.WindowSizeMsg {
 		if w >= 110 {
 			w -= 36
 		} else {
-			h -= 6
+			h -= m.agentPanelHeight()
 		}
 	}
 	return tea.WindowSizeMsg{Width: w, Height: h}
@@ -57,43 +57,105 @@ func (m *AppModel) updateChatSize(size tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func agentStatusStyle(status tasks.TaskStatus) lipgloss.Style {
+	color := "245"
+	switch status {
+	case tasks.TaskStatusRunning:
+		color = "6" // cyan
+	case tasks.TaskStatusPending:
+		color = "3" // yellow
+	case tasks.TaskStatusCompleted:
+		color = "2" // green
+	case tasks.TaskStatusFailed:
+		color = "1" // red
+	}
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color))
+}
+
+func (m *AppModel) agentPanelHeight() int {
+	if len(m.agentTasks) > 1 && m.height >= 24 {
+		return 11 // Two task cards and an overflow line.
+	}
+	return 6
+}
+
 func (m *AppModel) agentPanel(width, height int) string {
-	lines := []string{"Sub-agents"}
+	contentWidth := max(1, width-2)
+	fit := func(text string, limit int) string {
+		if limit <= 0 {
+			return ""
+		}
+		return runewidth.Truncate(strings.Join(strings.Fields(text), " "), limit, "…")
+	}
+	running := 0
+	for _, task := range m.agentTasks {
+		if task.Status == tasks.TaskStatusRunning {
+			running++
+		}
+	}
+	count := fmt.Sprintf("%d running", running)
+	header := lipgloss.NewStyle().Bold(true).Render(fit("Sub-agents", contentWidth))
+	countStyle := agentStatusStyle(tasks.TaskStatusRunning)
+	if running == 0 {
+		countStyle = agentStatusStyle(tasks.TaskStatusKilled)
+	}
+	if contentWidth >= runewidth.StringWidth("Sub-agents · ")+len(count) {
+		header += " · " + countStyle.Render(count)
+	} else {
+		header = countStyle.Render(fit(count, contentWidth))
+	}
+	lines := []string{header}
+	divider := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(strings.Repeat("─", contentWidth))
 	for i, task := range m.agentTasks {
-		// Reserve a line to make hidden tasks discoverable in small terminals.
-		if len(lines)+3 > height-1 {
-			lines = append(lines, fmt.Sprintf("+ %d more agents", len(m.agentTasks)-i))
+		remaining := height - len(lines)
+		if i+1 < len(m.agentTasks) {
+			remaining-- // Keep room for the overflow indicator.
+		}
+		needed := 3 // Status, ID, and current phase.
+		if i > 0 {
+			needed++ // Divider between task cards.
+		}
+		if remaining < needed {
+			lines = append(lines, fit(fmt.Sprintf("+ %d more agents", len(m.agentTasks)-i), contentWidth))
 			break
 		}
-		if height > 6 {
-			lines = append(lines, "")
+		if i > 0 {
+			lines = append(lines, divider)
 		}
-		lines = append(lines, string(task.Status)+" · "+task.Description, "ID: "+task.ID)
+		status := fit(string(task.Status), contentWidth)
+		statusLine := agentStatusStyle(task.Status).Render(status)
+		if available := contentWidth - runewidth.StringWidth(status) - 3; available > 0 && task.Description != "" {
+			statusLine += " · " + fit(task.Description, available)
+		}
 		summary := "Waiting to start"
-		if task.Progress != nil {
+		if task.Progress != nil && task.Progress.Summary != "" {
 			summary = task.Progress.Summary
+		} else if task.Status == tasks.TaskStatusRunning {
+			summary = "Starting"
 		}
 		switch task.Status {
 		case tasks.TaskStatusCompleted:
 			summary = "Finished"
 		case tasks.TaskStatusFailed:
 			summary = task.Error
+			if summary == "" {
+				summary = "Failed"
+			}
 		case tasks.TaskStatusKilled:
 			summary = "Stopped"
 		}
-		if len(lines) < height-1 {
-			lines = append(lines, summary)
-		}
-		if task.Progress != nil && len(lines) < height-1 {
+		lines = append(lines, statusLine, fit("ID: "+task.ID, contentWidth), fit(summary, contentWidth))
+		if remaining > needed && task.Progress != nil {
 			if activity := task.Progress.LastActivity; activity != nil {
-				lines = append(lines, activity.ToolName+": "+activity.ActivityDescription)
+				label := activity.ToolName
+				if activity.ActivityDescription != "" {
+					label += ": " + activity.ActivityDescription
+				}
+				lines = append(lines, fit(label, contentWidth))
 			}
 		}
 	}
-	for i := range lines {
-		lines[i] = runewidth.Truncate(strings.Join(strings.Fields(lines[i]), " "), width-2, "…")
-	}
-	return lipgloss.NewStyle().Width(width - 2).Height(height).MaxHeight(height).PaddingLeft(1).BorderLeft(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Render(strings.Join(lines, "\n"))
+	return lipgloss.NewStyle().Width(contentWidth).Height(height).MaxHeight(height).PaddingLeft(1).BorderLeft(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Render(strings.Join(lines, "\n"))
 }
 
 func (m *AppModel) viewWithAgents() string {
@@ -104,5 +166,5 @@ func (m *AppModel) viewWithAgents() string {
 	if m.width >= 110 {
 		return lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(m.width-36).MaxWidth(m.width-36).Render(chat), m.agentPanel(36, m.height))
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, chat, m.agentPanel(m.width, 6))
+	return lipgloss.JoinVertical(lipgloss.Left, chat, m.agentPanel(m.width, m.agentPanelHeight()))
 }

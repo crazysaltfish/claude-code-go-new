@@ -1,0 +1,42 @@
+:root {
+  color: #292b28;
+  background: #faf9f7;
+  font: 14px/1.55 Inter, system-ui, "PingFang SC", sans-serif;
+  --line: #e8e4df;
+  --muted: #686962;
+  --accent: #35674e;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { width: min(100%, 760px); margin: auto; padding: clamp(16px, 5vw, 36px); }
+h1 { font: 550 clamp(25px, 5vw, 34px)/1.2 Georgia, "Songti SC", serif; margin: 0; }
+h2 { margin: 0; font-size: 16px; font-weight: 650; }
+header p, section > p { color: var(--muted); margin: 7px 0 0; }
+header { margin-bottom: 27px; }
+section { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; margin-bottom: 14px; }
+.section-heading, li, .actions { display: flex; align-items: center; gap: 8px; }
+.section-heading, li { justify-content: space-between; }
+li { padding: 11px 0; }
+li + li { border-top: 1px solid var(--line); }
+li > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+li small { color: var(--muted); display: block; }
+ul { list-style: none; margin: 2px 0 0; padding: 0; }
+form { margin-top: 14px; }
+label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 5px; }
+input, button { font: inherit; }
+input { width: 100%; min-width: 0; border: 1px solid #d9d6d0; border-radius: 8px; padding: 8px 10px; color: inherit; }
+button { border: 1px solid transparent; padding: 6px 10px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+button:focus-visible, input:focus-visible { outline: 2px solid #4c8969; outline-offset: 2px; }
+button:disabled { opacity: .55; cursor: default; }
+.primary { background: var(--accent); color: white; }
+.primary:hover { background: #29553e; }
+.quiet { background: #f5f3ef; color: inherit; }
+.quiet:hover { background: #eeeae4; }
+.actions { justify-content: flex-end; flex-wrap: wrap; }
+form > .actions { margin-top: 12px; }
+.fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.fields > div { min-width: 0; }
+output { display: block; color: var(--accent); white-space: pre-wrap; overflow-wrap: anywhere; }
+output:not(:empty) { margin-top: 10px; }
+.error { color: #974838; }
+@media (max-width: 380px) { .fields { grid-template-columns: 1fr; } }

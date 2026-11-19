@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"claude-code-go/internal/agentapps"
 	"claude-code-go/internal/query"
 	"claude-code-go/internal/sessions"
 	"claude-code-go/internal/tasks"
@@ -62,12 +63,73 @@ func webTestServer(t *testing.T, client api.MessageClient) (*webServer, *webChat
 	app.toolRegistry = tools.NewToolRegistry()
 	app.queryEngine = query.NewQueryEngine(query.QueryEngineConfig{SessionID: app.session.ID, Cwd: app.config.Cwd, APIClient: client, PersistSession: app.persistSession})
 	s := &webServer{root: app, chats: make(map[string]*webChat)}
+	s.apps = agentapps.New(app.ctx, app.config.Cwd, t.TempDir(), "127.0.0.1:8080", nil)
+	t.Cleanup(s.apps.Close)
 	chat, err := s.add(app)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(app.cancel)
 	return s, chat, s.handler("127.0.0.1:8080")
+}
+
+func TestWebAppRoutes(t *testing.T) {
+	_, _, handler := webTestServer(t, &webScriptClient{})
+	list := webRequest(handler, http.MethodGet, "/api/apps", "")
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "claude-app-devkit") {
+		t.Fatalf("list apps: status %d body %s", list.Code, list.Body)
+	}
+	invalid := webRequest(handler, http.MethodPost, "/api/apps/abc/launch", "")
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("launch without JSON: status %d", invalid.Code)
+	}
+	for _, test := range []struct{ method, path string }{
+		{http.MethodGet, "/api/apps"},
+		{http.MethodGet, "/api/apps/fast-learning"},
+		{http.MethodPost, "/api/apps/fast-learning/stop"},
+		{http.MethodGet, "/api/chats"},
+	} {
+		request := httptest.NewRequest(test.method, "http://127.0.0.1:8080"+test.path, nil)
+		request.Header.Set("Sec-Fetch-Site", "same-site")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("sibling-origin access to %s: status %d", test.path, recorder.Code)
+		}
+	}
+}
+
+func TestWebAppDetailsAndStop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts loopback App servers")
+	}
+	_, _, handler := webTestServer(t, &webScriptClient{})
+	const path = "/api/apps/fast-learning"
+	assertApp := func(method, url, body, status string) {
+		t.Helper()
+		response := webRequest(handler, method, url, body)
+		var app agentapps.App
+		err := json.Unmarshal(response.Body.Bytes(), &app)
+		wantID := strings.Split(url, "/")[3]
+		if err != nil || response.Code != http.StatusOK || app.Status != status || app.ID != wantID || app.Version == "" || !app.Builtin {
+			t.Fatalf("%s %s: status %d, body %s, error %v", method, url, response.Code, response.Body, err)
+		}
+	}
+	for _, endpoint := range []string{path + "/launch", "/api/apps/claude-app-devkit/launch"} {
+		response := webRequest(handler, http.MethodPost, endpoint, "{}")
+		if response.Code != http.StatusOK {
+			t.Fatalf("start App: status %d body %s", response.Code, response.Body)
+		}
+	}
+	assertApp(http.MethodGet, path, "", "running")
+	assertApp(http.MethodPost, path+"/stop", "{}", "stopped")
+	assertApp(http.MethodPost, path+"/stop", "{}", "stopped")
+	assertApp(http.MethodGet, path, "", "stopped")
+	assertApp(http.MethodGet, "/api/apps/claude-app-devkit", "", "running")
+	response := webRequest(handler, http.MethodPost, "/api/apps/unknown/stop", "{}")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown App: status %d", response.Code)
+	}
 }
 func webRequest(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, "http://127.0.0.1:8080"+path, strings.NewReader(body))

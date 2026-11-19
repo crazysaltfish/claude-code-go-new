@@ -1,0 +1,44 @@
+package main
+
+import (
+	"encoding/json"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"time"
+
+	"claude-agent-app/app/frontend"
+)
+
+func main() {
+	socket := os.Getenv("CLAUDE_APP_SOCKET")
+	network, address := "unix", socket
+	if socket == "" {
+		network, address = "tcp", "127.0.0.1:0"
+	}
+	listener, err := net.Listen(network, address)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("Agent App listening on %s", listener.Addr())
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("POST /api/echo", func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Message string `json:"message"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&payload); err != nil {
+			http.Error(w, "invalid message", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(payload)
+	})
+	mux.Handle("GET /", http.FileServer(http.FS(frontend.Files)))
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	log.Fatal(server.Serve(listener))
+}

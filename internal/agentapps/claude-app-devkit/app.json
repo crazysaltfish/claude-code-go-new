@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "claude-app-devkit",
+  "version": "0.1.0",
+  "name": "Claude App DevKit",
+  "description": "创建、安装和管理当前项目的 Agent App"
+}

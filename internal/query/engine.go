@@ -270,6 +270,8 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 
 		if allowTools {
 			req.Tools = e.convertToolsForAPI()
+		} else {
+			req.System = systemPrompt + "\n\n" + followupTextInstruction
 		}
 
 		// Configure thinking if enabled
@@ -282,9 +284,13 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 
 		// Stream the API response. All deltas for this turn share a UUID so
 		// consumers can update one in-progress assistant message in place.
-		apiStarted := time.Now()
 		responseUUID := generateUUID()
-		response, err := e.callAPIStream(ctx, req, func(delta AssistantDelta) error {
+		emitDelta := func(delta AssistantDelta) error {
+			if !allowTools {
+				// Provider markup can span chunks. Check the complete response
+				// before exposing an automatic summary to any consumer.
+				return ctx.Err()
+			}
 			select {
 			case output <- SDKMessage{
 				Type:      "assistant_delta",
@@ -297,19 +303,27 @@ func (e *QueryEngine) executeQueryLoop(ctx context.Context, output chan<- interf
 			case <-ctx.Done():
 				return ctx.Err()
 			}
-		})
-		e.apiDuration += time.Since(apiStarted)
-		if response != nil {
-			if !allowTools {
-				blocks := response.Content[:0]
-				for _, block := range response.Content {
-					if block.Type != "tool_use" {
-						blocks = append(blocks, block)
-					}
-				}
-				response.Content = blocks
+		}
+		var response *api.MessageResponse
+		var err error
+		for attempt := 0; ; attempt++ {
+			apiStarted := time.Now()
+			response, err = e.callAPIStream(ctx, req, emitDelta)
+			e.apiDuration += time.Since(apiStarted)
+			if response == nil {
+				break
 			}
 			e.addUsage(response.Usage)
+			if allowTools || !cleanFollowupResponse(response) || err != nil ||
+				strings.TrimSpace(extractResponseText(response)) != "" {
+				break
+			}
+			if attempt == 0 && ctx.Err() == nil {
+				req.System = systemPrompt + "\n\n" + followupTextInstruction + "\nThe previous attempt returned a tool call. Produce the summary now as prose, without any markup for tool calls."
+				continue
+			}
+			output <- e.createErrorResultMessage("followup_no_summary", "Automatic sub-agent update did not return a text summary.", turnCount)
+			return
 		}
 		if err != nil {
 			if ctx.Err() == nil && !e.abortController.IsAborted() &&

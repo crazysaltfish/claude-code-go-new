@@ -53,9 +53,12 @@ Use Claude right from your terminal to:
 }
 
 func init() {
+	rootCmd.Flags().Bool("web", false, "Serve the local web chat UI")
+	rootCmd.Flags().String("web-addr", "127.0.0.1:8080", "Loopback address for the web chat")
 	rootCmd.Flags().BoolVarP(&debugFlag, "debug", "d", false, "Enable debug mode")
 	rootCmd.Flags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose output")
 	rootCmd.Flags().BoolVarP(&printModeFlag, "print", "p", false, "Print mode (non-interactive)")
+	rootCmd.MarkFlagsMutuallyExclusive("web", "print")
 	rootCmd.Flags().StringVarP(&modelFlag, "model", "m", "", "Model to use")
 	rootCmd.Flags().StringVar(&providerFlag, "provider", "", "API provider: anthropic or openai")
 	rootCmd.Flags().StringVar(&baseURLFlag, "base-url", "", "Override the provider API base URL")
@@ -112,7 +115,10 @@ var doctorCmd = &cobra.Command{
 
 func runMain(cmd *cobra.Command, args []string) {
 	// Create app config
+	web, _ := cmd.Flags().GetBool("web")
+	webAddr, _ := cmd.Flags().GetString("web-addr")
 	config := &cli.Config{
+		Web: web, WebAddr: webAddr,
 		Debug:          debugFlag,
 		Resume:         resumeFlag,
 		Continue:       continueFlag,

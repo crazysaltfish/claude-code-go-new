@@ -47,10 +47,13 @@ type App struct {
 	memoryDir          string
 	permissionMu       sync.RWMutex
 	permissionPromptMu sync.Mutex
+	webAgentLogs       sync.Map // Task ID to *webAgentLog
 }
 
 // Config holds CLI configuration.
 type Config struct {
+	Web            bool
+	WebAddr        string
 	Debug          bool
 	Verbose        bool
 	PrintMode      bool
@@ -221,8 +224,16 @@ func (a *App) Initialize() error {
 		if err != nil {
 			return nil, err
 		}
+		var log *webAgentLog
+		if a.config.Web {
+			log = &webAgentLog{}
+			a.webAgentLogs.Store(task.ID, log)
+		}
 		var final string
 		for message := range stream {
+			if log != nil {
+				log.record(message)
+			}
 			progress.record(message)
 			if onProgress != nil {
 				onProgress(message)
@@ -297,6 +308,9 @@ func (a *App) Run(initialPrompt string) error {
 		a.cancel()
 	}()
 
+	if a.config.Web {
+		return a.runWebMode()
+	}
 	if a.config.PrintMode {
 		return a.runPrintMode()
 	}

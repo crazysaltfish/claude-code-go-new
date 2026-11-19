@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude Code · Workspace</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude Code · Workspace</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script><script src="/agent-apps.js" defer></script></head>
 <body>
 <aside class="sidebar" id="sidebar">
   <div class="brand"><span class="brand-mark">✳</span><span>Claude Code <small>Workspace</small></span><button class="icon-button" id="close-sidebar" aria-label="收起侧栏">◧</button></div>
@@ -13,11 +13,31 @@
   <footer class="sidebar-footer"><div class="avatar">C</div><div><strong>本地工作空间</strong><small id="project-name">正在连接…</small></div><span class="connection-dot" id="connection-dot" title="连接状态"></span></footer>
 </aside>
 <div class="workspace">
-  <header class="topbar"><div class="header-left"><button class="icon-button" id="toggle-sidebar" aria-label="展开或收起侧栏">☰</button><span class="breadcrumb">WORKSPACE</span></div><h1 id="chat-title">新对话</h1><div class="header-actions"><button class="icon-button" id="export-chat" aria-label="导出对话" title="导出为 Markdown">⇩</button><button class="icon-button" id="toggle-tasks" aria-label="显示任务面板" title="任务面板">◫</button></div></header>
+  <header class="topbar"><div class="header-left"><button class="icon-button" id="toggle-sidebar" aria-label="展开或收起侧栏">☰</button><span class="breadcrumb">WORKSPACE</span></div><h1 id="chat-title">新对话</h1><div class="header-actions"><button class="icon-button" id="export-chat" aria-label="导出对话" title="导出为 Markdown">⇩</button><button class="icon-button" id="toggle-tasks" aria-label="显示任务面板" title="任务面板">◫</button><button class="icon-button" id="toggle-apps" aria-label="扩展应用" aria-controls="app-panel" aria-expanded="false" title="扩展应用"><span class="app-grid-icon" aria-hidden="true"></span></button></div></header>
   <main id="scroll-area"><div class="conversation" id="conversation"><section id="welcome" class="welcome"><div class="welcome-mark">✳</div><div class="eyebrow">YOUR CODE. A LITTLE MORE CLARITY.</div><h2>一起把想法，变成代码。</h2><p>探索项目、实现功能，或把复杂工作交给子 Agent。</p><div class="suggestions"><button data-prompt="帮我梳理这个项目的架构和核心执行流程"><span>▱</span><strong>理解项目</strong><small>梳理架构与核心流程</small></button><button data-prompt="检查当前项目的改动，指出值得关注的问题"><span>⌘</span><strong>审查改动</strong><small>发现代码中的细节</small></button><button data-prompt="启动两个后台子 Agent，分别分析项目架构和测试覆盖，结束后汇总建议"><span>◎</span><strong>并行探索</strong><small>让子 Agent 协作分析</small></button></div></section></div></main>
   <div class="composer-area"><div id="approvals" aria-live="polite"></div><div id="run-status" class="run-status" role="status"></div><form id="composer"><textarea id="prompt" rows="2" aria-label="输入消息" placeholder="有什么想一起完成的？" maxlength="100000"></textarea><div class="composer-toolbar"><div class="composer-meta"><span class="model-icon">✳</span><span id="model-label">连接中</span><span class="toolbar-divider"></span><span class="project-chip" id="project-chip">▱ 本地项目</span></div><button type="submit" class="send-button" id="send" disabled>发送</button><button type="button" class="stop-button hidden" id="stop">■ 停止</button></div></form><div class="composer-caption"><span>Enter 发送 · Shift + Enter 换行</span><span>在你的本地项目中运行</span></div></div>
 </div>
 <aside id="task-panel" class="task-panel hidden"><header><div><span class="eyebrow">AGENT ACTIVITY</span><h2>任务面板 <span id="running-count">0 running</span></h2></div><button class="icon-button" id="close-tasks" aria-label="关闭任务面板">×</button></header><div id="task-list"><p class="empty-tasks">还没有子 Agent 任务。<br>你可以在对话中委派独立工作。</p></div></aside>
+<aside id="app-panel" class="app-panel hidden" aria-label="扩展应用">
+  <header class="app-panel-header">
+    <nav class="app-tabs" id="app-tabs" aria-label="应用页面">
+      <button type="button" class="app-tab" id="app-catalog-tab" aria-current="page"><span class="app-grid-icon" aria-hidden="true"></span> 扩展应用</button>
+    </nav>
+    <div class="app-panel-controls">
+      <button type="button" class="icon-button" id="reload-app" aria-label="刷新" title="刷新">↻</button>
+      <button type="button" class="icon-button" id="expand-app" aria-label="扩大应用面板" title="扩大应用面板" aria-pressed="false">⤢</button>
+      <button type="button" class="icon-button" id="close-app-panel" aria-label="关闭扩展应用" title="关闭扩展应用">×</button>
+    </div>
+  </header>
+  <section id="app-catalog" class="app-catalog" aria-labelledby="app-catalog-title">
+    <h2 id="app-catalog-title">已安装应用</h2>
+    <label class="app-search"><span aria-hidden="true">⌕</span><input type="search" id="app-search" aria-label="搜索已安装应用" placeholder="搜索已安装应用"></label>
+    <p id="app-catalog-status" class="app-catalog-status" role="status"></p>
+    <ul id="app-list" class="app-list"></ul>
+  </section>
+  <p id="app-launch-status" class="app-launch-status hidden" role="status"></p>
+  <div id="app-frames" class="app-frames hidden"></div>
+</aside>
 <dialog id="agent-detail" aria-labelledby="agent-detail-title">
   <header class="agent-detail-header">
     <div><p class="eyebrow">子 Agent 详情</p><h2 id="agent-detail-title">任务详情</h2></div>

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fast Learning</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="identity">
+      <span class="brand" aria-hidden="true">
+        <svg viewBox="0 0 32 32" fill="none"><path d="M7 20 15.5 10 24 14.5M15.5 10l3 13.5" stroke="currentColor" stroke-width="1.6"/><circle cx="7" cy="20" r="2.4" fill="currentColor"/><circle cx="15.5" cy="10" r="3.3" fill="currentColor"/><circle cx="24" cy="14.5" r="2.6" fill="currentColor"/><circle cx="18.5" cy="23.5" r="2.3" fill="currentColor"/></svg>
+      </span>
+      <h1>Fast Learning</h1>
+    </div>
+    <nav aria-label="画布操作">
+      <button type="button" class="button quiet" id="library">我的画布</button>
+      <button type="button" class="button primary" id="new">＋ 新建</button>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section id="welcome" class="welcome" aria-labelledby="welcome-title">
+      <div class="welcome-inner">
+        <svg class="preview" viewBox="0 0 330 160" aria-hidden="true">
+          <defs><pattern id="dots" width="12" height="12" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="#dcdccb"/></pattern></defs>
+          <rect x="0" y="0" width="330" height="160" rx="22" fill="url(#dots)"/>
+          <path d="M122 80C167 80 155 32 205 32M122 80H205M122 80c45 0 33 48 83 48M217 32h46M217 128h46" stroke="#9ab3a0" stroke-width="1.8" fill="none"/>
+          <rect x="31" y="51" width="103" height="58" rx="12" fill="#355544"/>
+          <circle cx="50" cy="70" r="4" fill="#d2ead2"/>
+          <path d="M63 70h48M46 86h61M46 94h34" stroke="#d2ead2" stroke-width="2" stroke-linecap="round" opacity=".68"/>
+          <rect x="186" y="17" width="63" height="30" rx="7" fill="#edf3e8" stroke="#acc2a7"/>
+          <rect x="186" y="65" width="76" height="30" rx="7" fill="#f4ede1" stroke="#ccb088"/>
+          <rect x="186" y="113" width="63" height="30" rx="7" fill="#edf3e8" stroke="#acc2a7"/>
+          <rect x="263" y="21" width="32" height="22" rx="6" fill="#fbfaf4" stroke="#cbd6c6"/>
+          <rect x="263" y="117" width="32" height="22" rx="6" fill="#fbfaf4" stroke="#cbd6c6"/>
+          <path d="M200 32h34M200 80h45M200 128h35M273 32h12M273 128h12" stroke="#849b85" stroke-width="2" stroke-linecap="round" opacity=".8"/>
+        </svg>
+        <h2 id="welcome-title">从一个问题开始</h2>
+        <p>先看图解，再点开感兴趣的知识点追问，让答案长成一张知识地图。</p>
+        <button type="button" class="button example" id="example">查看光刻机示例 <span aria-hidden="true">↗</span></button>
+      </div>
+    </section>
+
+    <section id="book" class="book" aria-label="学习画布" hidden>
+      <section class="map-panel" aria-label="问题脉络">
+        <div class="map-header">
+          <div><h2 id="canvas-title"></h2><p id="node-count"></p></div>
+          <div class="map-tools" aria-label="缩放画布">
+            <button type="button" class="icon" id="zoom-out" title="缩小" aria-label="缩小">−</button>
+            <button type="button" class="icon" id="zoom-in" title="放大" aria-label="放大">＋</button>
+            <button type="button" class="button" id="fit" title="适应画布">全览</button>
+          </div>
+        </div>
+        <svg id="map" class="canvas-svg" aria-label="学习脉络，可拖动和缩放">
+          <g id="scene"></g>
+        </svg>
+      </section>
+      <article class="detail" id="detail" aria-label="问题图解">
+        <div id="detail-content"></div>
+      </article>
+    </section>
+  </main>
+
+  <footer class="composer">
+    <div class="compose-context" id="compose-context" hidden></div>
+    <form id="ask">
+      <label class="sr-only" for="question">学习问题</label>
+      <textarea id="question" rows="1" maxlength="400" required placeholder="你想弄明白什么？"></textarea>
+      <button type="submit" class="button primary" id="submit">生成图解 <span aria-hidden="true">↑</span></button>
+      <button type="button" class="button quiet" id="cancel" hidden>停止</button>
+    </form>
+    <p class="status" id="status" role="status"></p>
+  </footer>
+
+  <dialog id="history" aria-labelledby="history-title">
+    <div class="dialog-heading"><h2 id="history-title">我的学习画布</h2><form method="dialog"><button type="submit" class="icon" aria-label="关闭">×</button></form></div>
+    <ul id="history-list"></ul>
+    <p id="history-status" role="status"></p>
+  </dialog>
+</body>
+</html>

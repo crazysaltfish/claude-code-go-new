@@ -22,6 +22,7 @@ go test ./...
 | [internal/tools](internal/tools) | 工具注册、输入规范化、执行及结果 |
 | [internal/tasks](internal/tasks) | 子任务注册、执行、取消、状态快照及完成通知 |
 | [internal/webassets](internal/webassets) | 嵌入 Go 二进制的 Web 对话前端（原生 HTML / CSS / JavaScript） |
+| [internal/agentapps](internal/agentapps) | Agent App 清单、本地安装与运行时、默认 Claude App DevKit |
 | [internal/ui](internal/ui) | Bubble Tea 模型、工具详情、流事件合并、任务面板 |
 | [internal/sessions](internal/sessions) | 按项目保存和读取会话 |
 | [internal/memory](internal/memory) | 项目记忆、相关记忆召回、会话摘要 |
@@ -73,6 +74,22 @@ go test ./...
 Web 审批使用相同的 `canUseTool` 和 `PermissionResponse`，不得在 HTTP 层跳过权限逻辑。保留 loopback、Host、Origin 和 JSON 请求校验；消息和工具输出由前端按文本构造 DOM，禁止通过 `innerHTML` 注入模型内容。Web 是单机模式，不包含公开部署、远程鉴权或多租户隔离。
 
 新增 HTTP 行为的回归测试位于 [web_test.go](internal/cli/web_test.go)，使用脚本化模型响应和内存 HTTP recorder。浏览器测试也优先使用本地模拟模型与独立的 `CLAUDE_CONFIG_HOME`，避免消耗真实 API 或污染用户会话。
+
+### Agent App 规范（v1）
+
+| 路径 | 内容 |
+| --- | --- |
+| `app.json` | `schema_version` 为 `1`，`id` 以小写英文字母开头且其余字符使用小写英文字母、数字或短横线，最多 63 字符。其余字段为 `version`（例如 `0.1.0`）、`name` 和可选的 `description`。 |
+| `app/server-go/` | Go 服务源码。运行 `go build -o app/server-go/server ./app/server-go`，Windows 构建输出使用 `app/server-go/server.exe`。 |
+| `app/frontend/` | Web 前端源码。脚手架用 `go:embed` 把页面和静态资源编进服务。使用独立构建工具时，也应把产物编进服务，使安装只需要清单和二进制。 |
+
+Go 服务使用 `CLAUDE_APP_SOCKET` 指定的 Unix 域套接字，`GET /health` 返回 HTTP 200 后可对外提供服务，`GET /` 返回 App 入口。浏览器请求通过独立的回环 HTTP 来源转发给 Go 服务，前端使用相对 URL 访问本 App 的 API。Web 主页面在 iframe 内承载 App，并拒绝该来源访问对话 API。运行时通过 `CLAUDE_APP_PROJECT` 提供项目目录，通过 `CLAUDE_APP_DATA_DIR` 提供按项目和 App ID 隔离的数据目录。每次启动的服务输出写到数据目录下的 `server.log`。
+
+通过可选的 `"capabilities": ["agent"]` 申请宿主的模型与公开检索能力。运行时将 `CLAUDE_APP_AGENT_SOCKET` 注入该 App 的 Go 服务，SDK 位于 [pkg/appagent](pkg/appagent)。`appagent.NewClient(socket)` 提供 `Complete`（`POST /v1/complete`）和 `Search`（`POST /v1/search`）。每次调用使用工作区的模型或检索配置，仅接收 App 显式提供的输入。桥接端点通过每次启动创建的私有 Unix 套接字提供，浏览器只调用 App 自己的 API。
+
+默认 DevKit 的 Go 后端随 Web 服务编译，App 清单和页面随二进制嵌入。运行 `go test ./internal/agentapps ./internal/cli` 验证 DevKit、脚手架编译、安装、就绪检查、Go API 交互及项目隔离。
+
+[Fast Learning](apps/fast-learning) 随 Web 服务提供，也可在该目录运行 `go build -o app/server-go/server ./app/server-go`，再用 DevKit 安装构建版。卸载构建版后可重新打开随 Web 提供的版本。两种运行方式共享同一项目的 App 数据，包含本地画布、节点及检索资料。浏览器只渲染结构化知识点和关系，Agent 的输出不会作为可执行 SVG 注入页面。
 
 ## 验证入口
 

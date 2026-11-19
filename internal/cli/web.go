@@ -3,20 +3,24 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"claude-code-go/internal/agentapps"
 	"claude-code-go/internal/query"
 	"claude-code-go/internal/tasks"
 	"claude-code-go/internal/types"
 	"claude-code-go/internal/ui"
+	"claude-code-go/internal/utils"
 	"claude-code-go/internal/webassets"
 )
 
@@ -44,6 +48,7 @@ type webEvent struct {
 }
 type webServer struct {
 	root  *App
+	apps  *agentapps.Manager
 	mu    sync.Mutex
 	chats map[string]*webChat
 }
@@ -61,6 +66,8 @@ func (a *App) runWebMode() error {
 		return err
 	}
 	s := &webServer{root: a, chats: make(map[string]*webChat)}
+	s.apps = agentapps.New(a.ctx, a.config.Cwd, utils.GetClaudeDataHome(), listener.Addr().String(), newWebAppAgent(a))
+	defer s.apps.Close()
 	if _, err := s.add(a); err != nil {
 		listener.Close()
 		return err
@@ -229,6 +236,8 @@ func decodeWebJSON(w http.ResponseWriter, r *http.Request, target interface{}) e
 }
 func (s *webServer) handler(address string) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/apps", s.listWebApps)
+	mux.HandleFunc("POST /api/apps/{id}/launch", s.launchWebApp)
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
 		writeWebJSON(w, 200, map[string]string{"project": s.root.config.Cwd, "model": s.root.config.Model, "provider": s.root.config.Provider, "initial_chat": s.root.queryEngine.GetSessionID()})
 	})
@@ -288,16 +297,46 @@ func (s *webServer) handler(address string) http.Handler {
 				return
 			}
 		}
-		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		site := r.Header.Get("Sec-Fetch-Site")
+		if site == "cross-site" || (site == "same-site" && strings.HasPrefix(r.URL.Path, "/api/")) {
 			webError(w, 403, "cross-site request rejected")
 			return
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-src http://"+net.JoinHostPort(host, "*")+"; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		w.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(w, r)
 	})
 }
+
+func (s *webServer) listWebApps(w http.ResponseWriter, _ *http.Request) {
+	apps, err := s.apps.List()
+	if err != nil {
+		webError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeWebJSON(w, http.StatusOK, apps)
+}
+
+func (s *webServer) launchWebApp(w http.ResponseWriter, r *http.Request) {
+	var input struct{}
+	if err := decodeWebJSON(w, r, &input); err != nil {
+		webError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	host, _, _ := net.SplitHostPort(r.Host)
+	appURL, err := s.apps.Launch(r.PathValue("id"), host)
+	if err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		webError(w, status, err.Error())
+		return
+	}
+	writeWebJSON(w, http.StatusOK, map[string]string{"url": appURL})
+}
+
 func (s *webServer) chatAction(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	chat := s.chats[r.PathValue("id")]

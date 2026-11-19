@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Claude App DevKit</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Claude App DevKit</h1>
+      <p>在当前项目中创建、安装和管理 Agent App。</p>
+    </header>
+
+    <section aria-labelledby="installed-title">
+      <div class="section-heading">
+        <h2 id="installed-title">已安装应用</h2>
+        <button id="refresh" type="button" class="quiet">刷新</button>
+      </div>
+      <ul id="installed"></ul>
+    </section>
+
+    <section aria-labelledby="install-title">
+      <h2 id="install-title">安装或更新 App</h2>
+      <p>使用已构建的本地目录。App 启动后以当前系统用户身份运行，请选择信任的构建产物。</p>
+      <form id="install-form">
+        <label for="directory">App 目录的绝对路径</label>
+        <input id="directory" name="directory" required spellcheck="false" placeholder="/path/to/my-app">
+        <div class="actions">
+          <button type="submit" value="inspect" class="quiet">检查</button>
+          <button type="submit" value="install" class="primary">安装或更新</button>
+        </div>
+        <output aria-live="polite"></output>
+      </form>
+    </section>
+
+    <section aria-labelledby="scaffold-title">
+      <h2 id="scaffold-title">创建 App</h2>
+      <p>在项目下生成 app.json、Go 服务和可直接运行的前端示例。</p>
+      <form id="scaffold-form">
+        <div class="fields">
+          <div><label for="app-id">App ID</label><input id="app-id" name="id" required pattern="[a-z][a-z0-9\-]{0,62}" placeholder="my-app" spellcheck="false"></div>
+          <div><label for="app-name">显示名称</label><input id="app-name" name="name" required maxlength="100" placeholder="我的应用"></div>
+        </div>
+        <div class="actions"><button type="submit" class="primary">生成项目</button></div>
+        <output aria-live="polite"></output>
+      </form>
+    </section>
+    <p id="management-status" role="status"></p>
+  </main>
+</body>
+</html>

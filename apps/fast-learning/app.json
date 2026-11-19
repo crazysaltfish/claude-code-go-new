@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "fast-learning",
+  "version": "0.1.0",
+  "name": "Fast Learning",
+  "description": "从一个问题出发，检索资料、阅读交互图解，沿分支建立知识地图",
+  "capabilities": ["agent"]
+}

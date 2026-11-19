@@ -1,0 +1,6 @@
+:root { font: 16px system-ui, sans-serif; color: #292d2a; background: #faf9f7; }
+main { max-width: 32rem; margin: 3rem auto; padding: 0 1.5rem; }
+form { display: grid; gap: .75rem; }
+input, button { font: inherit; padding: .6rem .8rem; }
+button { justify-self: start; }
+output { display: block; margin-top: 1.25rem; overflow-wrap: anywhere; }

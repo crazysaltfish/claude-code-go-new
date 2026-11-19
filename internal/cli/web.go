@@ -237,7 +237,9 @@ func decodeWebJSON(w http.ResponseWriter, r *http.Request, target interface{}) e
 func (s *webServer) handler(address string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/apps", s.listWebApps)
+	mux.HandleFunc("GET /api/apps/{id}", s.webAppDetails)
 	mux.HandleFunc("POST /api/apps/{id}/launch", s.launchWebApp)
+	mux.HandleFunc("POST /api/apps/{id}/stop", s.stopWebApp)
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
 		writeWebJSON(w, 200, map[string]string{"project": s.root.config.Cwd, "model": s.root.config.Model, "provider": s.root.config.Provider, "initial_chat": s.root.queryEngine.GetSessionID()})
 	})
@@ -316,6 +318,33 @@ func (s *webServer) listWebApps(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeWebJSON(w, http.StatusOK, apps)
+}
+
+func (s *webServer) webAppDetails(w http.ResponseWriter, r *http.Request) {
+	app, err := s.apps.Details(r.PathValue("id"))
+	writeWebAppDetails(w, app, err)
+}
+
+func (s *webServer) stopWebApp(w http.ResponseWriter, r *http.Request) {
+	var input struct{}
+	if err := decodeWebJSON(w, r, &input); err != nil {
+		webError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	app, err := s.apps.Stop(r.PathValue("id"))
+	writeWebAppDetails(w, app, err)
+}
+
+func writeWebAppDetails(w http.ResponseWriter, app agentapps.App, err error) {
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		webError(w, status, err.Error())
+		return
+	}
+	writeWebJSON(w, http.StatusOK, app)
 }
 
 func (s *webServer) launchWebApp(w http.ResponseWriter, r *http.Request) {

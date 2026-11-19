@@ -38,6 +38,12 @@
   <p id="app-launch-status" class="app-launch-status hidden" role="status"></p>
   <div id="app-frames" class="app-frames hidden"></div>
 </aside>
+<dialog id="app-detail" aria-labelledby="app-detail-title">
+  <div class="dialog-heading"><h2 id="app-detail-title">应用详情</h2><form method="dialog"><button class="icon-button" aria-label="关闭应用详情" autofocus>×</button></form></div>
+  <p id="app-detail-description"></p>
+  <p id="app-detail-status" role="status"></p>
+  <dl id="app-detail-fields"></dl>
+</dialog>
 <dialog id="agent-detail" aria-labelledby="agent-detail-title">
   <header class="agent-detail-header">
     <div><p class="eyebrow">子 Agent 详情</p><h2 id="agent-detail-title">任务详情</h2></div>

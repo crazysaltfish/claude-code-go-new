@@ -97,6 +97,44 @@ func installedManifest(path string) (Manifest, error) {
 	return manifest, err
 }
 
+func (m *Manager) Details(id string) (App, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.details(id)
+}
+
+func (m *Manager) Stop(id string) (App, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	app, err := m.details(id)
+	if err != nil {
+		return App{}, err
+	}
+	m.stop(id)
+	return m.app(app.Manifest, app.Builtin), nil
+}
+
+// details expects m.mu to be held.
+func (m *Manager) details(id string) (App, error) {
+	if !appID.MatchString(id) {
+		return App{}, errAppNotInstalled
+	}
+	if id == devkitID {
+		return m.app(builtinManifest, true), nil
+	}
+	manifest, err := installedManifest(filepath.Join(m.registry, id+".zip"))
+	if errors.Is(err, fs.ErrNotExist) {
+		if id == fastLearningID {
+			return m.app(fastLearningManifest, true), nil
+		}
+		return App{}, errAppNotInstalled
+	}
+	if err != nil {
+		return App{}, err
+	}
+	return m.app(manifest, false), nil
+}
+
 func (m *Manager) app(manifest Manifest, builtin bool) App {
 	status := "stopped"
 	if app := m.running[manifest.ID]; app != nil && app.alive() {

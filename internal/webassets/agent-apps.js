@@ -9,16 +9,27 @@
   const frames = $('app-frames');
   const list = $('app-list');
   const search = $('app-search');
+  const detail = $('app-detail');
   const tabs = new Map();
+  const pendingStops = new Set();
   let apps = [];
   let active = null;
   let catalogGeneration = 0;
   let launchGeneration = 0;
+  let detailGeneration = 0;
+
+  const appPath = id => `/api/apps/${encodeURIComponent(id)}`;
+  const appStatus = app => app.status === 'running' ? '运行中' : '已停止';
+
+  function closeActions() {
+    list.querySelector(':popover-open')?.hidePopover();
+  }
 
   function showPanel(open) {
     panel.classList.toggle('hidden', !open);
     toggle.setAttribute('aria-expanded', String(open));
     if (open) $('task-panel').classList.add('hidden');
+    else closeActions();
   }
 
   function closePanel() {
@@ -27,6 +38,7 @@
   }
 
   function select(tab) {
+    if (tab) closeActions();
     active = tab;
     catalog.classList.toggle('hidden', Boolean(tab));
     frames.classList.toggle('hidden', !tab);
@@ -69,21 +81,111 @@
     const filtered = apps.filter(app => [app.name, app.id, app.description].some(value => value.toLowerCase().includes(query)));
     catalogStatus.textContent = filtered.length ? '' : '未找到匹配的应用。';
     list.replaceChildren(...filtered.map(app => {
-      const item = document.createElement('li');
-      const button = text('button', '', 'app-card');
+      const item = text('li', '', 'app-card');
+      const button = text('button', '', 'app-card-open');
       button.type = 'button';
       const mark = text('span', app.builtin ? '⌘' : app.name.trim().slice(0, 1).toUpperCase(), 'app-mark');
       mark.setAttribute('aria-hidden', 'true');
       const copy = text('span', '', 'app-card-copy');
       const name = text('strong', app.name);
       copy.append(name, text('small', app.description || app.id));
-      const arrow = text('span', '›', 'app-card-arrow');
-      arrow.setAttribute('aria-hidden', 'true');
-      button.append(mark, copy, arrow);
+      copy.append(text('span', appStatus(app), `app-state ${app.status}`));
+      button.append(mark, copy);
       button.onclick = () => openApp(app);
-      item.append(button);
+      button.disabled = pendingStops.has(app.id);
+      item.append(button, ...makeActions(app, button));
       return item;
     }));
+  }
+
+  function makeActions(app, openButton) {
+    const trigger = text('button', '⋯', 'app-actions-trigger icon-button');
+    trigger.type = 'button';
+    trigger.id = `app-actions-trigger-${app.id}`;
+    trigger.setAttribute('aria-label', `${app.name} 的操作`);
+    trigger.title = '应用操作';
+    const menu = text('div', '', 'app-actions');
+    menu.id = `app-actions-${app.id}`;
+    menu.setAttribute('popover', 'auto');
+    trigger.setAttribute('popovertarget', menu.id);
+    menu.addEventListener('toggle', event => {
+      if (event.newState !== 'open') return;
+      const anchor = trigger.getBoundingClientRect();
+      menu.style.left = `${Math.max(8, anchor.right - menu.offsetWidth)}px`;
+      menu.style.top = `${anchor.bottom + menu.offsetHeight + 12 <= window.innerHeight
+        ? anchor.bottom + 5 : Math.max(8, anchor.top - menu.offsetHeight - 5)}px`;
+    });
+    const details = text('button', '查看详情');
+    details.type = 'button';
+    details.onclick = () => {
+      menu.hidePopover();
+      trigger.focus();
+      showDetails(app);
+    };
+    const stop = text('button', '终止运行', 'app-stop-action');
+    stop.type = 'button';
+    stop.disabled = app.status !== 'running' || pendingStops.has(app.id);
+    stop.onclick = () => {
+      menu.hidePopover();
+      trigger.focus();
+      stop.disabled = openButton.disabled = true;
+      terminateApp(app);
+    };
+    menu.append(details, stop);
+    return [trigger, menu];
+  }
+
+  async function showDetails(app) {
+    const generation = ++detailGeneration;
+    $('app-detail-title').textContent = app.name;
+    $('app-detail-description').textContent = '';
+    $('app-detail-status').textContent = '正在读取应用详情…';
+    const fields = $('app-detail-fields');
+    fields.replaceChildren();
+    detail.showModal();
+    try {
+      const current = await api(appPath(app.id));
+      if (!detail.open || generation !== detailGeneration) return;
+      $('app-detail-title').textContent = current.name;
+      $('app-detail-description').textContent = current.description;
+      $('app-detail-status').textContent = '';
+      const rows = [
+        ['运行状态', appStatus(current)],
+        ['版本', current.version],
+        ['App ID', current.id],
+        ['安装来源', current.builtin ? '默认安装' : '本地安装'],
+      ];
+      if (current.capabilities?.includes('agent')) rows.push(['应用能力', '工作区 Agent']);
+      fields.replaceChildren(...rows.flatMap(([label, value]) => [text('dt', label), text('dd', value)]));
+    } catch (error) {
+      if (detail.open && generation === detailGeneration) $('app-detail-status').textContent = error.message;
+    }
+  }
+
+  async function terminateApp(app) {
+    pendingStops.add(app.id);
+    try {
+      const launch = tabs.get(app.id)?.launch;
+      if (launch) await launch.catch(() => {});
+      const stopped = await api(`${appPath(app.id)}/stop`, {});
+      const tab = tabs.get(app.id);
+      if (tab) removeTab(tab);
+      if (tab && active === tab) {
+        ++launchGeneration;
+        select(null);
+      }
+      apps = apps.map(item => item.id === stopped.id ? stopped : item);
+      toast(`已终止 ${stopped.name} 的运行`);
+    } catch (error) {
+      toast(`无法终止 ${app.name}。${error.message}`);
+    } finally {
+      pendingStops.delete(app.id);
+      if (!active && !panel.classList.contains('hidden') && !search.disabled) {
+        const restoreFocus = document.activeElement?.id === `app-actions-trigger-${app.id}`;
+        renderApps();
+        if (restoreFocus) $(`app-actions-trigger-${app.id}`)?.focus();
+      }
+    }
   }
 
   function makeTab(app) {
@@ -121,6 +223,7 @@
   }
 
   async function openApp(app, reload = false) {
+    if (pendingStops.has(app.id)) return;
     const tab = tabs.get(app.id) || makeTab(app);
     tab.app = app;
     tab.button.textContent = tab.frame.title = app.name;
@@ -133,8 +236,9 @@
       launchStatus.classList.remove('hidden');
       frames.classList.add('hidden');
     }
+    const launch = tab.launch ??= api(`${appPath(app.id)}/launch`, {});
     try {
-      const {url} = await api(`/api/apps/${encodeURIComponent(app.id)}/launch`, {});
+      const {url} = await launch;
       if (generation !== launchGeneration) return;
       if (tab.url !== url || reload) tab.frame.src = url;
       tab.url = url;
@@ -147,6 +251,8 @@
       launchStatus.textContent = `无法启动 ${app.name}。${error.message}`;
       launchStatus.classList.add('app-error');
       launchStatus.classList.remove('hidden');
+    } finally {
+      if (tab.launch === launch) tab.launch = null;
     }
   }
 
@@ -171,6 +277,8 @@
     control.setAttribute('aria-pressed', String(expanded));
   };
   search.oninput = renderApps;
+  catalog.addEventListener('scroll', closeActions);
+  window.addEventListener('resize', closeActions);
   for (const id of ['tasks-button', 'toggle-tasks']) {
     $(id).addEventListener('click', () => {
       if (!$('task-panel').classList.contains('hidden')) showPanel(false);

@@ -93,6 +93,17 @@ func TestDevKitAndLocalAppLifecycle(t *testing.T) {
 	if apps, err := manager.List(); err != nil || len(apps) != 3 || apps[1].Status != "stopped" {
 		t.Fatalf("stopped App list: %v, %v", apps, err)
 	}
+	relaunched, err := manager.Launch(id, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app, err := manager.Stop(id); err != nil || app.Status != "stopped" || app.Builtin {
+		t.Fatalf("stop installed App: %+v, %v", app, err)
+	}
+	if response, err := client.Get(relaunched); err == nil {
+		response.Body.Close()
+		t.Fatal("stopped App still accepts connections")
+	}
 	manager.Close()
 	manager = New(ctx, project, home, "127.0.0.1:8080", nil)
 	t.Cleanup(manager.Close)

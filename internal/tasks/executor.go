@@ -243,12 +243,13 @@ type RemoteAgentHandler func(ctx context.Context, task *RemoteAgentTaskState) (i
 
 // Manager provides high-level task management.
 type Manager struct {
-	registry      *Registry
-	executor      *Executor
-	store         *types.AppStateStore
-	taskChan      chan TaskNotification
-	agentFinished chan struct{}
-	mu            sync.RWMutex
+	registry        *Registry
+	executor        *Executor
+	store           *types.AppStateStore
+	taskChan        chan TaskNotification
+	agentFinished   chan struct{}
+	onAgentTerminal func(string)
+	mu              sync.RWMutex
 }
 
 // NewManager creates a new task manager.
@@ -261,8 +262,20 @@ func NewManager(store *types.AppStateStore) *Manager {
 		taskChan:      make(chan TaskNotification, 100),
 		agentFinished: make(chan struct{}, 1),
 	}
-	m.executor.onAgentFinished = m.signalAgentFinished
+	m.executor.onAgentFinished = m.agentTerminal
 	return m
+}
+
+// SetAgentTerminalObserver installs an observer before task execution starts.
+func (m *Manager) SetAgentTerminalObserver(observer func(string)) {
+	m.onAgentTerminal = observer
+}
+
+func (m *Manager) agentTerminal(task *LocalAgentTaskState) {
+	if m.onAgentTerminal != nil {
+		m.onAgentTerminal(task.ID)
+	}
+	m.signalAgentFinished(task)
 }
 
 // SpawnLocalAgent spawns a new local agent task.
@@ -400,7 +413,7 @@ func (m *Manager) KillTask(id string) error {
 
 	m.notifyTaskKilled(task)
 	if agent, ok := task.(*LocalAgentTaskState); ok {
-		m.signalAgentFinished(agent)
+		m.agentTerminal(agent)
 	}
 	return nil
 }

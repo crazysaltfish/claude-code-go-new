@@ -21,6 +21,7 @@ go test ./...
 | [pkg/api](pkg/api) | Anthropic 与 OpenAI 兼容客户端 |
 | [internal/tools](internal/tools) | 工具注册、输入规范化、执行及结果 |
 | [internal/tasks](internal/tasks) | 子任务注册、执行、取消、状态快照及完成通知 |
+| [internal/webassets](internal/webassets) | 嵌入 Go 二进制的 Web 对话前端（原生 HTML / CSS / JavaScript） |
 | [internal/ui](internal/ui) | Bubble Tea 模型、工具详情、流事件合并、任务面板 |
 | [internal/sessions](internal/sessions) | 按项目保存和读取会话 |
 | [internal/memory](internal/memory) | 项目记忆、相关记忆召回、会话摘要 |
@@ -62,6 +63,16 @@ go test ./...
 [AppModel](internal/ui/app.go) 持有当前查询流、权限请求及子 Agent 面板。Bubble Tea 命令应捕获要读取的流和上下文，把变化作为消息交回 `Update`，避免从工作 goroutine 修改 UI 状态。
 
 [流事件合并](internal/ui/event_batch.go) 将连续文本增量和工具进度按约 75 ms 合并；最终响应、工具结果及错误使缓冲立即提交，保持事件顺序。聊天组件只渲染可见区域并缓存消息视图。工具详情保留打开时的快照；Verbose 的裁剪属于展示层，修改它时不要裁剪存储历史、权限审批输入或模型上下文。
+
+## Web 模式
+
+`--web` 在 [internal/cli/web.go](internal/cli/web.go) 中启动仅监听回环地址的 HTTP 服务，前端资源由 [internal/webassets](internal/webassets) 嵌入。保持构建无前端安装步骤；修改 JS 后可用 `node --check internal/webassets/app.js` 检查语法。
+
+每个浏览器对话持有独立 `App`，串行执行用户消息和子 Agent 自动续聊。SSE 发送 SDK 事件、查询结果、审批及运行状态，使用事件 ID 支持断线重连。HTTP 断连不取消查询；取消必须显式请求。会话恢复使用初始历史加当前进程事件重放，避免把模型上下文、API Key 或配置密钥暴露给列表接口。
+
+Web 审批使用相同的 `canUseTool` 和 `PermissionResponse`，不得在 HTTP 层跳过权限逻辑。保留 loopback、Host、Origin 和 JSON 请求校验；消息和工具输出由前端按文本构造 DOM，禁止通过 `innerHTML` 注入模型内容。Web 是单机模式，不包含公开部署、远程鉴权或多租户隔离。
+
+新增 HTTP 行为的回归测试位于 [web_test.go](internal/cli/web_test.go)，使用脚本化模型响应和内存 HTTP recorder。浏览器测试也优先使用本地模拟模型与独立的 `CLAUDE_CONFIG_HOME`，避免消耗真实 API 或污染用户会话。
 
 ## 验证入口
 

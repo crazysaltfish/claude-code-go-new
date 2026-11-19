@@ -24,11 +24,12 @@ const (
 type TaskStatus string
 
 const (
-	TaskStatusPending   TaskStatus = "pending"
-	TaskStatusRunning   TaskStatus = "running"
-	TaskStatusCompleted TaskStatus = "completed"
-	TaskStatusFailed    TaskStatus = "failed"
-	TaskStatusKilled    TaskStatus = "killed"
+	TaskStatusPending     TaskStatus = "pending"
+	TaskStatusRunning     TaskStatus = "running"
+	TaskStatusCompleted   TaskStatus = "completed"
+	TaskStatusFailed      TaskStatus = "failed"
+	TaskStatusKilled      TaskStatus = "killed"
+	TaskStatusInterrupted TaskStatus = "interrupted"
 )
 
 // =============================================================================

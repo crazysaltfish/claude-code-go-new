@@ -67,3 +67,10 @@
 .agent-event summary { cursor: pointer; }
 .agent-event-time { color: #66736a; font-size: 12px; margin-left: 8px; white-space: nowrap; }
 .agent-message { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.65; margin: 0; }
+
+.agent-tool-label {
+  color: #59665e;
+  font-size: 13px;
+  font-weight: 600;
+  margin: 10px 0 5px;
+}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -248,48 +249,91 @@ func TestWebBackgroundAgentTriggersSameSessionFollowup(t *testing.T) {
 	}
 }
 
-func TestWebAgentDetailShowsExecutionAndScopesItToTheChat(t *testing.T) {
+func TestWebAgentDetailPairsCallsAndRestoresArchive(t *testing.T) {
 	_, chat, handler := webTestServer(t, &webScriptClient{})
-	manager := chat.app.toolRegistry.TaskManager()
-	task, err := manager.SpawnLocalAgentForSession(chat.app.ctx, chat.id, "Inspect the README", "general-agent", "Read docs", true)
+	app := chat.app
+	manager := app.toolRegistry.TaskManager()
+	task, err := manager.SpawnLocalAgentForSession(app.ctx, chat.id, "Inspect the README", "general-agent", "Read docs", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	log := &webAgentLog{}
-	log.record(query.SDKMessage{Type: "assistant", Message: &api.MessageResponse{Content: []api.ContentBlock{
+	recording := app.webAgentLog(task.ID)
+	recording.record(query.SDKMessage{Type: "assistant", Message: &api.MessageResponse{Content: []api.ContentBlock{
 		{Type: "thinking", Thinking: "private reasoning"},
 		{Type: "text", Text: "Reading the documentation"},
-		{Type: "tool_use", Name: "Read", Input: json.RawMessage(`{"file_path":"README.MD"}`)},
+		{Type: "tool_use", ID: "first", Name: "Read", Input: json.RawMessage(`{"file_path":"README.MD"}`)},
+		{Type: "tool_use", ID: "second", Name: "Read", Input: json.RawMessage(`{"file_path":"CLAUDE.md"}`)},
 	}}})
-	log.record(query.SDKMessage{Type: "tool_result", Message: map[string]interface{}{
-		"tool_name": "Read", "content": "documentation output",
-	}})
-	chat.app.webAgentLogs.Store(task.ID, log)
-	path := "/api/chats/" + chat.id + "/agent?task="
-	response := webRequest(handler, "GET", path+task.ID, "")
-	if response.Code != http.StatusOK {
-		t.Fatal(response.Body.String())
+	for _, id := range []string{"second", "first"} {
+		recording.record(query.SDKMessage{Type: "tool_result", Message: map[string]interface{}{
+			"tool_use_id": id, "tool_name": "Read", "content": id + " result",
+		}})
 	}
-	var body struct {
-		Task    tasks.LocalAgentTaskState
-		Entries []webAgentEntry
+	checkDetail := func(handler http.Handler, wantStatus tasks.TaskStatus) {
+		t.Helper()
+		response := webRequest(handler, "GET", "/api/chats/"+chat.id+"/agent?task="+task.ID, "")
+		if response.Code != http.StatusOK {
+			t.Fatal(response.Body.String())
+		}
+		var body sessions.AgentRecord
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Task == nil || body.Task.Prompt != "Inspect the README" || body.Task.Status != wantStatus || len(body.Entries) != 3 {
+			t.Fatalf("unexpected detail: %+v", body)
+		}
+		for i, id := range []string{"first", "second"} {
+			entry := body.Entries[i+1]
+			if entry.Kind != "tool_call" || entry.CallID != id || entry.Output == nil || entry.Output.Text != id+" result" {
+				t.Fatalf("mispaired tool result: %+v", entry)
+			}
+		}
+		if strings.Contains(response.Body.String(), "private reasoning") {
+			t.Fatal("detail exposed internal reasoning")
+		}
 	}
-	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+	checkDetail(handler, tasks.TaskStatusPending)
+	app.saveWebAgent(task.ID, recording)
+	persisted := make(chan struct{})
+	manager.SetAgentTerminalObserver(func(id string) {
+		app.saveTerminalWebAgent(id)
+		close(persisted)
+	})
+	if err := manager.StartExecution(app.ctx, task.ID, func(context.Context, *tasks.LocalAgentTaskState) (interface{}, error) {
+		return "finished", nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if body.Task.Prompt != "Inspect the README" || len(body.Entries) != 3 ||
-		body.Entries[1].Kind != "tool_call" || body.Entries[2].Text != "documentation output" {
-		t.Fatalf("unexpected detail: %+v", body)
-	}
-	if strings.Contains(response.Body.String(), "private reasoning") {
-		t.Fatal("detail exposed internal reasoning")
+	select {
+	case <-persisted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected terminal record to be persisted")
 	}
 
-	foreign, err := manager.SpawnLocalAgentForSession(chat.app.ctx, "other-chat", "private prompt", "general-agent", "Other chat", true)
+	restored := NewApp(&Config{Cwd: app.config.Cwd}, "test")
+	t.Cleanup(restored.cancel)
+	restored.sessionStore = app.sessionStore
+	restored.session, err = restored.sessionStore.Load(chat.id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response := webRequest(handler, "GET", path+foreign.ID, ""); response.Code != http.StatusNotFound {
-		t.Fatalf("foreign task status: %d", response.Code)
+	restored.queryEngine = query.NewQueryEngine(query.QueryEngineConfig{SessionID: chat.id})
+	restored.toolRegistry = tools.NewToolRegistry()
+	server := &webServer{root: restored, chats: make(map[string]*webChat)}
+	if _, err := server.add(restored); err != nil {
+		t.Fatal(err)
+	}
+	restoredHandler := server.handler("127.0.0.1:8080")
+	checkDetail(restoredHandler, tasks.TaskStatusCompleted)
+	state := webRequest(restoredHandler, "GET", "/api/chats/"+chat.id+"/state", "")
+	if state.Code != http.StatusOK || !strings.Contains(state.Body.String(), task.ID) {
+		t.Fatal("archived task missing from the task panel")
+	}
+	list := webRequest(restoredHandler, "GET", "/api/chats", "")
+	if list.Code != http.StatusOK || strings.Contains(list.Body.String(), task.ID) {
+		t.Fatal("agent record leaked into recent conversations")
+	}
+	if _, err := restored.sessionStore.LoadAgent("other-chat", task.ID); !os.IsNotExist(err) {
+		t.Fatalf("foreign session could read the record: %v", err)
 	}
 }

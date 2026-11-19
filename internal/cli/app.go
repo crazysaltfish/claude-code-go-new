@@ -159,6 +159,10 @@ func (a *App) Initialize() error {
 	// Initialize tool registry
 	a.toolRegistry = tools.NewToolRegistryWithOptions(tools.RegistryOptionsFromEnv())
 
+	if a.config.Web {
+		a.toolRegistry.TaskManager().SetAgentTerminalObserver(a.saveTerminalWebAgent)
+	}
+
 	// Initialize the selected provider client.
 	switch provider {
 	case "openai":
@@ -220,21 +224,21 @@ func (a *App) Initialize() error {
 			MaxTurns:           a.config.MaxTurns,
 			AppendSystemPrompt: constants.DefaultAgentPrompt,
 		})
+		var log *webAgentLog
+		if a.config.Web {
+			log = a.webAgentLog(task.ID)
+			a.saveWebAgent(task.ID, log)
+		}
 		stream, err := engine.SubmitMessage(ctx, task.Prompt)
 		if err != nil {
 			return nil, err
 		}
-		var log *webAgentLog
-		if a.config.Web {
-			log = &webAgentLog{}
-			a.webAgentLogs.Store(task.ID, log)
-		}
 		var final string
 		for message := range stream {
-			if log != nil {
-				log.record(message)
-			}
 			progress.record(message)
+			if log != nil && log.record(message) {
+				a.saveWebAgent(task.ID, log)
+			}
 			if onProgress != nil {
 				onProgress(message)
 			}

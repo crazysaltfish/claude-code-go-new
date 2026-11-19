@@ -23,18 +23,19 @@ import (
 // Each browser conversation owns an App and serializes query/follow-up turns.
 // The HTTP transport only handles snapshots, events and approval responses.
 type webChat struct {
-	app          *App
-	id           string
-	history      []types.Message
-	mu           sync.Mutex
-	busy         bool
-	stopped      bool
-	cancel       context.CancelFunc
-	events       []webEvent
-	changed      chan struct{}
-	messages     chan string
-	approvals    map[string]ui.PermissionRequest
-	nextApproval int
+	archivedAgents map[string]tasks.TaskState
+	app            *App
+	id             string
+	history        []types.Message
+	mu             sync.Mutex
+	busy           bool
+	stopped        bool
+	cancel         context.CancelFunc
+	events         []webEvent
+	changed        chan struct{}
+	messages       chan string
+	approvals      map[string]ui.PermissionRequest
+	nextApproval   int
 }
 type webEvent struct {
 	ID   int         `json:"id"`
@@ -97,7 +98,12 @@ func (s *webServer) add(app *App) (*webChat, error) {
 	if app.session.Title == "Untitled session" {
 		app.session.Title = ""
 	}
-	chat := &webChat{app: app, id: app.queryEngine.GetSessionID(), history: append([]types.Message(nil), app.session.History...), changed: make(chan struct{}), messages: make(chan string, 1), approvals: make(map[string]ui.PermissionRequest)}
+	id := app.queryEngine.GetSessionID()
+	archived, err := app.sessionStore.ListAgents(id)
+	if err != nil {
+		return nil, err
+	}
+	chat := &webChat{archivedAgents: archived, app: app, id: id, history: append([]types.Message(nil), app.session.History...), changed: make(chan struct{}), messages: make(chan string, 1), approvals: make(map[string]ui.PermissionRequest)}
 	s.chats[chat.id] = chat
 	go chat.run()
 	go chat.permissions()
@@ -326,7 +332,13 @@ func (s *webServer) chatAction(w http.ResponseWriter, r *http.Request) {
 			}
 			data := map[string]interface{}{"history": chat.history, "busy": chat.busy, "approvals": pending}
 			chat.mu.Unlock()
-			data["tasks"] = chat.app.toolRegistry.TaskManager().GetAllTasks()
+			agentTasks := chat.app.toolRegistry.TaskManager().GetAllTasks()
+			for id, archived := range chat.archivedAgents {
+				if _, live := agentTasks[id]; !live {
+					agentTasks[id] = archived
+				}
+			}
+			data["tasks"] = agentTasks
 			writeWebJSON(w, 200, data)
 		case "events":
 			chat.stream(w, r)

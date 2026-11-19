@@ -75,10 +75,10 @@ function approval(data){
   card.append(actions);$('approvals').append(card);state.approvals.set(data.id,card);
 }
 function removeApproval(id){state.approvals.get(id)?.remove();state.approvals.delete(id);}
-const agentLabels = {running:'运行中', pending:'等待中', completed:'已完成', failed:'失败', killed:'已停止'};
+const agentLabels = {running:'运行中', pending:'等待中', completed:'已完成', failed:'失败', killed:'已停止', interrupted:'已中断'};
 function agentPhase(task) {
   if (task.status === 'failed') return task.error || '执行失败';
-  if (['completed', 'killed'].includes(task.status)) return agentLabels[task.status];
+  if (['completed', 'killed', 'interrupted'].includes(task.status)) return agentLabels[task.status];
   return task.progress?.summary || '等待执行';
 }
 
@@ -157,7 +157,7 @@ async function refreshAgentDetail() {
   }
 }
 
-function renderAgentDetail({task, entries, omitted, result}) {
+function renderAgentDetail({task, entries, result}) {
   const body = $('agent-detail-body');
   const scrollTop = body.scrollTop;
   const expanded = new Set(Array.from(body.querySelectorAll('details[open]'), detail => detail.dataset.entry));
@@ -176,11 +176,10 @@ function renderAgentDetail({task, entries, omitted, result}) {
 
   const process = text('section', '', 'agent-section');
   process.append(text('h3', '执行过程'));
-  if (omitted) process.append(text('p', `已省略最早的 ${omitted} 条记录。`, 'agent-detail-phase'));
   const timeline = text('ol', '', 'agent-timeline');
   let focusTarget;
   for (const entry of entries || []) {
-    const item = text('li', '', 'agent-event' + (entry.failed ? ' failed' : ''));
+    const item = text('li', '', 'agent-event' + (entry.output?.failed ? ' failed' : ''));
     const timestamp = text('span', timeLabel(entry.time), 'agent-event-time');
     if (entry.kind === 'message') {
       const heading = text('div', 'Agent 回复', 'agent-event-heading');
@@ -190,14 +189,28 @@ function renderAgentDetail({task, entries, omitted, result}) {
       const detail = document.createElement('details');
       detail.dataset.entry = String(entry.id);
       detail.open = expanded.has(detail.dataset.entry);
-      const title = entry.kind === 'tool_call' ? '调用' : entry.failed ? '失败' : '返回';
-      const summary = text('summary', `${title} · ${entry.tool}`);
+      const result = entry.output;
+      const status = result ? (result.failed ? '失败' : '已返回') :
+        ['running', 'pending'].includes(task.status) ? '等待输出' : '无返回记录';
+      const summary = text('summary', `${entry.tool || '工具'} · ${status}`);
       summary.append(timestamp);
-      let content = entry.text;
-      if (entry.kind === 'tool_call' && !entry.truncated) {
-        try { content = pretty(JSON.parse(content)); } catch { /* Preserve the original arguments. */ }
+      detail.append(summary);
+      if (entry.kind === 'tool_call') {
+        let input = entry.text;
+        if (!entry.truncated) {
+          try { input = pretty(JSON.parse(input)); } catch { /* Preserve the original arguments. */ }
+        }
+        detail.append(text('div', '输入', 'agent-tool-label'),
+          text('pre', input + (entry.truncated ? '\n[内容已截断]' : '')));
       }
-      detail.append(summary, text('pre', content + (entry.truncated ? '\n[内容已截断]' : '')));
+      const outputLabel = text('div', '输出', 'agent-tool-label');
+      if (result?.time) outputLabel.append(text('span', timeLabel(result.time), 'agent-event-time'));
+      detail.append(outputLabel);
+      if (result) {
+        detail.append(text('pre', (result.text || '（空输出）') + (result.truncated ? '\n[内容已截断]' : '')));
+      } else {
+        detail.append(text('p', status, 'agent-detail-phase'));
+      }
       if (detail.dataset.entry === focusedEntry) focusTarget = summary;
       item.append(detail);
     }

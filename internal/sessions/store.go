@@ -72,24 +72,6 @@ func (s *Store) Save(session *Session) error {
 	if session.Cwd != s.cwd {
 		return fmt.Errorf("session belongs to another project")
 	}
-	if err := os.MkdirAll(s.dir, 0700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(s.dir)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("session directory must be a regular directory")
-	}
-	if err := os.Chmod(s.dir, 0700); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
-		return fmt.Errorf("session must be a regular file")
-	} else if err != nil && !os.IsNotExist(err) {
-		return err
-	}
 	session.UpdatedAt = time.Now().UTC()
 	if session.Title == "" {
 		session.Title = Title(session.History)
@@ -98,7 +80,29 @@ func (s *Store) Save(session *Session) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(s.dir, ".session-*")
+	return writePrivateSnapshot(s.dir, path, data)
+}
+
+func writePrivateSnapshot(dir, path string, data []byte) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("session directory must be a regular directory")
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("session must be a regular file")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".snapshot-*")
 	if err != nil {
 		return err
 	}

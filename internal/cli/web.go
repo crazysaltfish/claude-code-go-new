@@ -236,6 +236,7 @@ func decodeWebJSON(w http.ResponseWriter, r *http.Request, target interface{}) e
 }
 func (s *webServer) handler(address string) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/workspace/{scope}", s.workspaceFiles)
 	mux.HandleFunc("GET /api/apps", s.listWebApps)
 	mux.HandleFunc("GET /api/apps/{id}", s.webAppDetails)
 	mux.HandleFunc("POST /api/apps/{id}/launch", s.launchWebApp)

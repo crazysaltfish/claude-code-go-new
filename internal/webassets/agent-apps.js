@@ -28,7 +28,7 @@
   function showPanel(open) {
     panel.classList.toggle('hidden', !open);
     toggle.setAttribute('aria-expanded', String(open));
-    if (open) $('task-panel').classList.add('hidden');
+    if (open) showSidePanel('apps');
     else closeActions();
   }
 
@@ -279,9 +279,7 @@
   search.oninput = renderApps;
   catalog.addEventListener('scroll', closeActions);
   window.addEventListener('resize', closeActions);
-  for (const id of ['tasks-button', 'toggle-tasks']) {
-    $(id).addEventListener('click', () => {
-      if (!$('task-panel').classList.contains('hidden')) showPanel(false);
-    });
-  }
+  document.addEventListener('web-side-panel', event => {
+    if (event.detail !== 'apps') showPanel(false);
+  });
 })();

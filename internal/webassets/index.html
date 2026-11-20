@@ -1,23 +1,54 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude Code · Workspace</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script><script src="/agent-apps.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude Code · Workspace</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script><script src="/agent-apps.js" defer></script><script src="/workspace.js" defer></script></head>
 <body>
 <aside class="sidebar" id="sidebar">
   <div class="brand"><span class="brand-mark">✳</span><span>Claude Code <small>Workspace</small></span><button class="icon-button" id="close-sidebar" aria-label="收起侧栏">◧</button></div>
   <button class="new-chat" id="new-chat"><span>＋</span> 新对话 <kbd>⌘ K</kbd></button>
   <div class="search-wrap"><span>⌕</span><input id="search" aria-label="搜索对话" placeholder="搜索对话"></div>
-  <button class="nav-item" id="project-button"><span>▱</span> 项目空间 <span class="subtle">本地</span></button>
+  <button class="nav-item" id="project-button" aria-controls="project-panel" aria-expanded="false"><span class="folder-icon" aria-hidden="true"></span> 项目空间 <span class="subtle">本地</span></button>
   <button class="nav-item" id="tasks-button"><span>◎</span> 子 Agent 任务 <span id="task-count" class="count">0</span></button>
   <div class="list-label">最近对话 <span id="chat-total"></span></div>
   <nav id="chat-list" aria-label="历史对话"></nav>
   <footer class="sidebar-footer"><div class="avatar">C</div><div><strong>本地工作空间</strong><small id="project-name">正在连接…</small></div><span class="connection-dot" id="connection-dot" title="连接状态"></span></footer>
 </aside>
 <div class="workspace">
-  <header class="topbar"><div class="header-left"><button class="icon-button" id="toggle-sidebar" aria-label="展开或收起侧栏">☰</button><span class="breadcrumb">WORKSPACE</span></div><h1 id="chat-title">新对话</h1><div class="header-actions"><button class="icon-button" id="export-chat" aria-label="导出对话" title="导出为 Markdown">⇩</button><button class="icon-button" id="toggle-tasks" aria-label="显示任务面板" title="任务面板">◫</button><button class="icon-button" id="toggle-apps" aria-label="扩展应用" aria-controls="app-panel" aria-expanded="false" title="扩展应用"><span class="app-grid-icon" aria-hidden="true"></span></button></div></header>
+  <header class="topbar"><div class="header-left"><button class="icon-button" id="toggle-sidebar" aria-label="展开或收起侧栏">☰</button><span class="breadcrumb">WORKSPACE</span></div><h1 id="chat-title">新对话</h1><div class="header-actions"><button class="icon-button" id="export-chat" aria-label="导出对话" title="导出为 Markdown">⇩</button><button class="icon-button" id="toggle-project" aria-label="项目空间" aria-controls="project-panel" aria-expanded="false" title="项目空间"><span class="folder-icon" aria-hidden="true"></span></button><button class="icon-button" id="toggle-tasks" aria-label="显示任务面板" title="任务面板">◎</button><button class="icon-button" id="toggle-apps" aria-label="扩展应用" aria-controls="app-panel" aria-expanded="false" title="扩展应用"><span class="app-grid-icon" aria-hidden="true"></span></button></div></header>
   <main id="scroll-area"><div class="conversation" id="conversation"><section id="welcome" class="welcome"><div class="welcome-mark">✳</div><div class="eyebrow">YOUR CODE. A LITTLE MORE CLARITY.</div><h2>一起把想法，变成代码。</h2><p>探索项目、实现功能，或把复杂工作交给子 Agent。</p><div class="suggestions"><button data-prompt="帮我梳理这个项目的架构和核心执行流程"><span>▱</span><strong>理解项目</strong><small>梳理架构与核心流程</small></button><button data-prompt="检查当前项目的改动，指出值得关注的问题"><span>⌘</span><strong>审查改动</strong><small>发现代码中的细节</small></button><button data-prompt="启动两个后台子 Agent，分别分析项目架构和测试覆盖，结束后汇总建议"><span>◎</span><strong>并行探索</strong><small>让子 Agent 协作分析</small></button></div></section></div></main>
   <div class="composer-area"><div id="approvals" aria-live="polite"></div><div id="run-status" class="run-status" role="status"></div><form id="composer"><textarea id="prompt" rows="2" aria-label="输入消息" placeholder="有什么想一起完成的？" maxlength="100000"></textarea><div class="composer-toolbar"><div class="composer-meta"><span class="model-icon">✳</span><span id="model-label">连接中</span><span class="toolbar-divider"></span><span class="project-chip" id="project-chip">▱ 本地项目</span></div><button type="submit" class="send-button" id="send" disabled>发送</button><button type="button" class="stop-button hidden" id="stop">■ 停止</button></div></form><div class="composer-caption"><span>Enter 发送 · Shift + Enter 换行</span><span>在你的本地项目中运行</span></div></div>
 </div>
 <aside id="task-panel" class="task-panel hidden"><header><div><span class="eyebrow">AGENT ACTIVITY</span><h2>任务面板 <span id="running-count">0 running</span></h2></div><button class="icon-button" id="close-tasks" aria-label="关闭任务面板">×</button></header><div id="task-list"><p class="empty-tasks">还没有子 Agent 任务。<br>你可以在对话中委派独立工作。</p></div></aside>
+<aside id="project-panel" class="project-panel hidden" aria-labelledby="project-panel-title">
+  <header class="project-panel-header">
+    <h2 id="project-panel-title"><span class="folder-icon" aria-hidden="true"></span> 项目空间</h2>
+    <div><button type="button" class="icon-button" id="reload-project" aria-label="刷新目录" title="刷新目录">↻</button><button type="button" class="icon-button" id="close-project" aria-label="关闭项目空间" title="关闭项目空间">×</button></div>
+  </header>
+  <div class="project-browser">
+    <section class="project-directory" aria-labelledby="directory-title">
+      <div class="project-directory-heading">
+        <nav id="directory-crumbs" class="directory-crumbs" aria-label="目录路径"></nav>
+        <h3 id="directory-title">会话目录</h3>
+        <p id="directory-path" class="directory-path"></p>
+        <p id="directory-description" class="directory-description"></p>
+        <div class="directory-controls">
+          <input type="search" id="directory-search" aria-label="搜索文件名称" placeholder="搜索名称">
+          <select id="directory-sort" aria-label="文件排序"><option value="name">按名称</option><option value="modified">最近修改</option></select>
+        </div>
+      </div>
+      <div class="directory-results">
+        <p id="directory-status" role="status"></p>
+        <table aria-label="目录文件" id="directory-table">
+          <thead><tr><th scope="col">名称</th><th scope="col">修改时间</th></tr></thead>
+          <tbody id="directory-files"></tbody>
+        </table>
+      </div>
+    </section>
+    <nav class="project-tree" aria-labelledby="project-tree-title">
+      <h3 id="project-tree-title">目录</h3>
+      <ul id="project-tree-list"></ul>
+    </nav>
+  </div>
+</aside>
 <aside id="app-panel" class="app-panel hidden" aria-label="扩展应用">
   <header class="app-panel-header">
     <nav class="app-tabs" id="app-tabs" aria-label="应用页面">
@@ -51,6 +82,5 @@
   </header>
   <div id="agent-detail-body" aria-busy="false"></div>
 </dialog>
-<dialog id="project-dialog"><div class="dialog-heading"><h2>项目空间</h2><button class="icon-button" id="close-project" aria-label="关闭">×</button></div><p>对话和工具操作使用以下本地工作目录。</p><pre id="project-path"></pre><p class="muted">更换项目时，请在目标目录重新启动 Web 服务。API 配置保存在服务端，不会发送到浏览器。</p></dialog>
 <div id="toast" role="alert" class="toast hidden"></div>
 </body></html>

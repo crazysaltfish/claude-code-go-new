@@ -84,7 +84,8 @@
       const item = text('li', '', 'app-card');
       const button = text('button', '', 'app-card-open');
       button.type = 'button';
-      const mark = text('span', app.builtin ? '⌘' : app.name.trim().slice(0, 1).toUpperCase(), 'app-mark');
+      const mark = text('span', app.builtin ? '' : [...app.name.trim()][0]?.toUpperCase(), 'app-mark');
+      if (app.builtin) mark.append(uiIcon(app.id === 'claude-app-devkit' ? 'code' : 'apps'));
       mark.setAttribute('aria-hidden', 'true');
       const copy = text('span', '', 'app-card-copy');
       const name = text('strong', app.name);
@@ -99,7 +100,8 @@
   }
 
   function makeActions(app, openButton) {
-    const trigger = text('button', '⋯', 'app-actions-trigger icon-button');
+    const trigger = text('button', '', 'app-actions-trigger icon-button');
+    trigger.append(uiIcon('more'));
     trigger.type = 'button';
     trigger.id = `app-actions-trigger-${app.id}`;
     trigger.setAttribute('aria-label', `${app.name} 的操作`);
@@ -191,7 +193,8 @@
   function makeTab(app) {
     const group = text('div', '', 'app-tab-group');
     const button = text('button', app.name, 'app-tab');
-    const close = text('button', '×', 'app-tab-close');
+    const close = text('button', '', 'app-tab-close icon-button');
+    close.append(uiIcon('close'));
     button.type = close.type = 'button';
     close.setAttribute('aria-label', `关闭 ${app.name}`);
     const frame = document.createElement('iframe');
@@ -271,7 +274,7 @@
   $('expand-app').onclick = event => {
     const control = event.currentTarget;
     const expanded = panel.classList.toggle('expanded');
-    control.textContent = expanded ? '⤡' : '⤢';
+    control.replaceChildren(uiIcon(expanded ? 'collapse' : 'expand'));
     control.title = expanded ? '还原应用面板' : '扩大应用面板';
     control.setAttribute('aria-label', control.title);
     control.setAttribute('aria-pressed', String(expanded));

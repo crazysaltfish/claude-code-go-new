@@ -2,6 +2,16 @@
 const $ = id => document.getElementById(id);
 const state = {id:null,config:null,chats:[],busy:false,source:null,tools:new Map(),assistants:new Map(),approvals:new Map(),generation:0,transcript:[],lastEvent:0};
 const text = (tag, value, className) => {const node=document.createElement(tag);node.textContent=value??'';if(className)node.className=className;return node;};
+function uiIcon(name, extraClass = '') {
+  const ns = 'http://www.w3.org/2000/svg';
+  const icon = document.createElementNS(ns, 'svg');
+  const use = document.createElementNS(ns, 'use');
+  icon.setAttribute('class', extraClass ? 'ui-icon ' + extraClass : 'ui-icon');
+  icon.setAttribute('aria-hidden', 'true');
+  use.setAttribute('href', '/icons.svg#' + name);
+  icon.append(use);
+  return icon;
+}
 const pretty = value => typeof value==='string'?value:JSON.stringify(value,null,2);
 function toast(message){$('toast').textContent=message;$('toast').classList.remove('hidden');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').classList.add('hidden'),4500);}
 async function api(path,body){
@@ -30,7 +40,7 @@ function markdown(parent,value){
 function hideWelcome(){$('welcome')?.remove();}
 function message(role,value,key){
   hideWelcome();const follow=nearBottom();const article=text('article','',`message ${role}`);let body=text('div','','message-body');
-  if(role==='assistant'){const heading=text('div','','assistant-heading');heading.append(text('span','✳','star'),text('span',state.config?.model||'Claude Code'));article.append(heading);markdown(body,value);}else body.textContent=value;
+  if(role==='assistant'){const heading=text('div','','assistant-heading');heading.append(uiIcon('brand','star'),text('span',state.config?.model||'Claude Code'));article.append(heading);markdown(body,value);}else body.textContent=value;
   article.append(body);if(role==='assistant'){const actions=text('div','','message-actions');const copy=text('button','复制');copy.onclick=()=>navigator.clipboard.writeText(article.dataset.content||'').then(()=>toast('已复制')).catch(()=>toast('无法访问剪贴板'));actions.append(copy);article.append(actions);}
   article.dataset.content=value;$('conversation').append(article);state.transcript.push({role,article});if(key)state.assistants.set(key,{article,body,value});if(follow)scrollBottom();return {article,body,value};
 }
@@ -95,7 +105,7 @@ function renderTasks(tasks) {
   const list = $('task-list');
   const focusedID = list.contains(document.activeElement) ? document.activeElement.dataset.task : null;
   $('task-count').textContent = all.length;
-  $('running-count').textContent = all.filter(task => task.status === 'running').length + ' running';
+  $('running-count').textContent = all.filter(task => task.status === 'running').length + ' 个运行中';
   list.replaceChildren();
   if (!all.length) {
     list.append(text('p', '还没有子 Agent 任务。你可以在对话中委派独立工作。', 'empty-tasks'));
@@ -276,16 +286,32 @@ $('close-sidebar').onclick=()=>$('sidebar').classList.add('collapsed');
 function showSidePanel(name){
   document.dispatchEvent(new CustomEvent('web-side-panel', {detail:name}));
 }
-for (const id of ['tasks-button','toggle-tasks']) $(id).onclick=()=>{
-  if (!$('task-panel').classList.toggle('hidden')) showSidePanel('tasks');
+const taskTriggers = ['tasks-button', 'toggle-tasks'];
+let taskOpener = null;
+function showTasks(open) {
+  $('task-panel').classList.toggle('hidden', !open);
+  for (const id of taskTriggers) $(id).setAttribute('aria-expanded', String(open));
+  if (open) showSidePanel('tasks');
+}
+for (const id of taskTriggers) $(id).onclick = () => {
+  const open = $('task-panel').classList.contains('hidden');
+  taskOpener = $(id);
+  if (open && id === 'tasks-button' && innerWidth <= 760) {
+    $('sidebar').classList.add('collapsed');
+    taskOpener = $('toggle-tasks');
+  }
+  showTasks(open);
 };
-$('close-tasks').onclick=()=>$('task-panel').classList.add('hidden');
+$('close-tasks').onclick = () => {
+  showTasks(false);
+  taskOpener?.focus();
+};
 document.addEventListener('web-side-panel', event => {
-  if (event.detail !== 'tasks') $('task-panel').classList.add('hidden');
+  if (event.detail !== 'tasks') showTasks(false);
 });
 $('export-chat').onclick=()=>{const content=state.transcript.map(m=>(m.role==='user'?'## 你':'## Claude Code')+'\n\n'+m.article.dataset.content).join('\n\n');const url=URL.createObjectURL(new Blob([content],{type:'text/markdown;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='conversation.md';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);};
 document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key==='k'){event.preventDefault();$('new-chat').click();}});
 if(innerWidth<=760)$('sidebar').classList.add('collapsed');
-async function initialize(){try{state.config=await api('/api/config');$('model-label').textContent=state.config.model;$('project-name').textContent=state.config.project.split('/').filter(Boolean).pop();$('project-chip').textContent='▱ '+$('project-name').textContent;await refreshChats();const requested=decodeURIComponent(location.hash.slice(1));await selectChat(state.chats.some(c=>c.id===requested)?requested:state.config.initial_chat);}catch(error){toast(error.message);$('run-status').textContent='无法连接本地服务，请刷新重试';}}
+async function initialize(){try{state.config=await api('/api/config');$('model-label').textContent=state.config.model;$('project-name').textContent=state.config.project.split('/').filter(Boolean).pop();$('project-chip-label').textContent=$('project-name').textContent;$('project-chip').title=state.config.project;await refreshChats();const requested=decodeURIComponent(location.hash.slice(1));await selectChat(state.chats.some(c=>c.id===requested)?requested:state.config.initial_chat);}catch(error){toast(error.message);$('run-status').textContent='无法连接本地服务，请刷新重试';}}
 initialize();
 setInterval(async()=>{const id=state.id,generation=state.generation;if(!id)return;try{const data=await api(`/api/chats/${id}/state`);if(generation!==state.generation)return;renderTasks(data.tasks);const pending=new Set((data.approvals||[]).map(a=>a.id));for(const key of state.approvals.keys())if(!pending.has(key))removeApproval(key);(data.approvals||[]).forEach(approval);}catch{}},1200);

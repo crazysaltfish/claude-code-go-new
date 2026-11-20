@@ -40,12 +40,6 @@
     });
   }
 
-  function icon(kind) {
-    const mark = text('span', '', kind === 'directory' ? 'folder-icon' : 'file-icon');
-    mark.setAttribute('aria-hidden', 'true');
-    return mark;
-  }
-
   function reveal(scope, path) {
     let prefix = '';
     expanded.add(key(scope, prefix));
@@ -69,8 +63,9 @@
     const id = key(scope, path);
     const directory = kind === 'directory';
     const row = text(directory ? 'button' : 'span', '', 'project-tree-row');
-    row.append(text('span', directory ? expanded.has(id) ? '⌄' : '›' : '', 'directory-chevron'), icon(kind), text('span', name, 'tree-name'));
-    row.firstChild.setAttribute('aria-hidden', 'true');
+    const disclosure = text('span', '', 'directory-chevron');
+    if (directory) disclosure.append(uiIcon('chevron'));
+    row.append(disclosure, uiIcon(directory ? 'folder' : kind), text('span', name, 'tree-name'));
     row.title = name;
     if (directory) {
       row.type = 'button';
@@ -122,7 +117,7 @@
     crumbs.replaceChildren();
     if (parts.length) {
       [meta.name, ...parts].forEach((name, index) => {
-        if (index) crumbs.append(text('span', '›'));
+        if (index) crumbs.append(uiIcon('chevron'));
         if (index === parts.length) {
           crumbs.append(text('span', name));
           return;
@@ -157,7 +152,7 @@
       const row = document.createElement('tr');
       const name = document.createElement('td');
       const label = text(entry.kind === 'directory' ? 'button' : 'span', '', 'directory-entry');
-      label.append(icon(entry.kind), text('span', entry.name));
+      label.append(uiIcon(entry.kind === 'directory' ? 'folder' : entry.kind), text('span', entry.name));
       label.title = entry.name;
       if (entry.kind === 'directory') {
         label.type = 'button';

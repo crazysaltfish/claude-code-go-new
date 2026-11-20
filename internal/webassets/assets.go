@@ -5,5 +5,5 @@ import "embed"
 
 // Files contains the complete browser application.
 //
-//go:embed index.html app.js style.css agent-apps.js workspace.js
+//go:embed index.html app.js style.css agent-apps.js workspace.js icons.svg
 var Files embed.FS

@@ -37,7 +37,8 @@ type AgentOutput struct {
 	Truncated bool   `json:"truncated,omitempty"`
 }
 
-func (s *Store) agentDir(sessionID string) (string, error) {
+// AgentDir returns the directory of saved Agent records for a session.
+func (s *Store) AgentDir(sessionID string) (string, error) {
 	if !validID.MatchString(sessionID) {
 		return "", fmt.Errorf("invalid parent session ID %q", sessionID)
 	}
@@ -49,7 +50,7 @@ func (s *Store) SaveAgent(record AgentRecord) error {
 	if task == nil || !validID.MatchString(task.ID) {
 		return fmt.Errorf("invalid agent task")
 	}
-	dir, err := s.agentDir(task.SessionID)
+	dir, err := s.AgentDir(task.SessionID)
 	if err != nil {
 		return err
 	}
@@ -66,7 +67,7 @@ func (s *Store) LoadAgent(sessionID, taskID string) (AgentRecord, error) {
 	if !validID.MatchString(taskID) {
 		return record, fmt.Errorf("invalid agent ID %q", taskID)
 	}
-	dir, err := s.agentDir(sessionID)
+	dir, err := s.AgentDir(sessionID)
 	if err != nil {
 		return record, err
 	}
@@ -98,7 +99,7 @@ func (s *Store) LoadAgent(sessionID, taskID string) (AgentRecord, error) {
 }
 
 func (s *Store) ListAgents(sessionID string) (map[string]tasks.TaskState, error) {
-	dir, err := s.agentDir(sessionID)
+	dir, err := s.AgentDir(sessionID)
 	if err != nil {
 		return nil, err
 	}

@@ -254,6 +254,7 @@ async function selectChat(id){
   if (agentDialog.open) agentDialog.close();
   renderTasks({});
   const generation=++state.generation;state.source?.close();state.id=id;state.lastEvent=0;state.tools.clear();state.assistants.clear();state.approvals.clear();state.transcript=[];$('conversation').replaceChildren();$('approvals').replaceChildren();setBusy(false);renderChats();
+  document.dispatchEvent(new Event('web-chat-changed'));
   const data=await api(`/api/chats/${id}/state`);if(generation!==state.generation)return;replayHistory(data.history);renderTasks(data.tasks);(data.approvals||[]).forEach(approval);setBusy(data.busy);
   if(!data.history?.length){const welcome=welcomeTemplate.cloneNode(true);$('conversation').append(welcome);bindSuggestions();}
   const source=new EventSource(`/api/chats/${id}/events`);state.source=source;source.onopen=()=>$('connection-dot').classList.remove('offline');
@@ -272,13 +273,19 @@ $('new-chat').onclick=async()=>{try{const data=await api('/api/chats',{});await 
 $('search').oninput=renderChats;
 $('toggle-sidebar').onclick=()=>$('sidebar').classList.toggle('collapsed');
 $('close-sidebar').onclick=()=>$('sidebar').classList.add('collapsed');
-for(const id of ['tasks-button','toggle-tasks'])$(id).onclick=()=>$('task-panel').classList.toggle('hidden');
+function showSidePanel(name){
+  document.dispatchEvent(new CustomEvent('web-side-panel', {detail:name}));
+}
+for (const id of ['tasks-button','toggle-tasks']) $(id).onclick=()=>{
+  if (!$('task-panel').classList.toggle('hidden')) showSidePanel('tasks');
+};
 $('close-tasks').onclick=()=>$('task-panel').classList.add('hidden');
-$('project-button').onclick=()=>$('project-dialog').showModal();
-$('close-project').onclick=()=>$('project-dialog').close();
+document.addEventListener('web-side-panel', event => {
+  if (event.detail !== 'tasks') $('task-panel').classList.add('hidden');
+});
 $('export-chat').onclick=()=>{const content=state.transcript.map(m=>(m.role==='user'?'## 你':'## Claude Code')+'\n\n'+m.article.dataset.content).join('\n\n');const url=URL.createObjectURL(new Blob([content],{type:'text/markdown;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='conversation.md';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);};
 document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key==='k'){event.preventDefault();$('new-chat').click();}});
 if(innerWidth<=760)$('sidebar').classList.add('collapsed');
-async function initialize(){try{state.config=await api('/api/config');$('model-label').textContent=state.config.model;$('project-name').textContent=state.config.project.split('/').filter(Boolean).pop();$('project-chip').textContent='▱ '+$('project-name').textContent;$('project-path').textContent=state.config.project;await refreshChats();const requested=decodeURIComponent(location.hash.slice(1));await selectChat(state.chats.some(c=>c.id===requested)?requested:state.config.initial_chat);}catch(error){toast(error.message);$('run-status').textContent='无法连接本地服务，请刷新重试';}}
+async function initialize(){try{state.config=await api('/api/config');$('model-label').textContent=state.config.model;$('project-name').textContent=state.config.project.split('/').filter(Boolean).pop();$('project-chip').textContent='▱ '+$('project-name').textContent;await refreshChats();const requested=decodeURIComponent(location.hash.slice(1));await selectChat(state.chats.some(c=>c.id===requested)?requested:state.config.initial_chat);}catch(error){toast(error.message);$('run-status').textContent='无法连接本地服务，请刷新重试';}}
 initialize();
 setInterval(async()=>{const id=state.id,generation=state.generation;if(!id)return;try{const data=await api(`/api/chats/${id}/state`);if(generation!==state.generation)return;renderTasks(data.tasks);const pending=new Set((data.approvals||[]).map(a=>a.id));for(const key of state.approvals.keys())if(!pending.has(key))removeApproval(key);(data.approvals||[]).forEach(approval);}catch{}},1200);
